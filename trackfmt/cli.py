@@ -44,6 +44,12 @@ def build_parser() -> argparse.ArgumentParser:
           action="store_true",
           help="Show what would be done without making changes.",
       )
+    if name == "gain":
+      subparser.add_argument(
+          "--force",
+          action="store_true",
+          help="Recalculate ReplayGain metadata even when tags already exist.",
+      )
     if name == "dedup":
       subparser.add_argument(
           "--length",
@@ -151,6 +157,7 @@ def handle_grouping(args: argparse.Namespace) -> None:
 
 
 def handle_gain(args: argparse.Namespace) -> None:
+  skip_existing = [] if args.force else ["--skip-existing"]
   subprocess.run(
       [
           "rsgain",
@@ -159,7 +166,7 @@ def handle_gain(args: argparse.Namespace) -> None:
           "no_album",
           "-m",
           "MAX",
-          "--skip-existing",
+          *skip_existing,
           str(args.directory),
       ],
       check=True,
