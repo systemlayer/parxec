@@ -1,0 +1,30 @@
+# Temporary files
+*.tmp
+*.temp
+*.swp
+.cache/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Archives
+*.tgz
+*.tar
+*.tar.gz
+
+# Python
+__pycache__/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+
+# Local environment files
+.env
+.env.*
+!.env.sample
