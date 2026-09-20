@@ -128,17 +128,18 @@ def ffmpeg_crop(width: int, height: int, target_width: int, target_height: int, 
 
 
 def print_table(title: str, values: dict[str, str]) -> None:
+  column_space = " " * 4
   label_width = max(map(len, values))
   table_width = max(
     len(title),
-    max(label_width + 2 + len(value) for value in values.values()),
+    max(label_width + len(column_space) + len(value) for value in values.values()),
   )
 
   print(title)
   print("-" * table_width)
 
   for label, value in values.items():
-    print(f"{label:<{label_width}}  {value}")
+    print(f"{label:<{label_width}}{column_space}{value}")
 
 
 def main() -> None:
@@ -171,19 +172,19 @@ def main() -> None:
   exact_even_crop = ffmpeg_crop(width, height, exact_even_width, exact_even_height, top, right, bottom, left)
 
   resolutions = {
-    "Input resolution:": f"{width}x{height}",
-    "Input resolution after crop:": f"{cropped_width}x{cropped_height}",
-    "Closest practical 16:9 resolution:": f"{practical_width}x{practical_height}",
-    "Closest practical even 16:9 resolution:": f"{practical_even_width}x{practical_even_height}",
-    "Mathematically exact 16:9 resolution:": f"{exact_width}x{exact_height}",
-    "Mathematically exact even 16:9 resolution:": f"{exact_even_width}x{exact_even_height}",
+    "Input resolution": f"{width}x{height}",
+    "Input resolution after crop": f"{cropped_width}x{cropped_height}",
+    "Closest practical 16:9 resolution": f"{practical_width}x{practical_height}",
+    "Closest practical even 16:9 resolution": f"{practical_even_width}x{practical_even_height}",
+    "Mathematically exact 16:9 resolution": f"{exact_width}x{exact_height}",
+    "Mathematically exact even 16:9 resolution": f"{exact_even_width}x{exact_even_height}",
   }
 
   crop_filters = {
-    "Closest practical 16:9:": practical_crop,
-    "Closest practical even 16:9:": practical_even_crop,
-    "Mathematically exact 16:9:": exact_crop,
-    "Mathematically exact even 16:9:": exact_even_crop,
+    "Closest practical 16:9": practical_crop,
+    "Closest practical even 16:9": practical_even_crop,
+    "Mathematically exact 16:9": exact_crop,
+    "Mathematically exact even 16:9": exact_even_crop,
   }
 
   print_table("Dimensions", resolutions)

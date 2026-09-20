@@ -53,3 +53,12 @@ The **mathematically exact** result may crop more, but its dimensions retain an
 exact 16:9 ratio when proportionally scaled. The **even** variants additionally
 ensure both dimensions are divisible by two, which is required or preferred by
 many video codecs.
+
+## Testing
+
+The test suite uses Python's built-in `unittest` framework and requires no
+third-party packages. Run it from this directory:
+
+```sh
+python3 -m unittest -v test_cropcalc.py
+```
