@@ -1,5 +1,5 @@
 ---
-name: review-unpublished-pii
+name: review-unpublished-privacy
 description: Review commits ahead of the configured Git upstream for exposed personally identifiable information or suspicious PII handling. Invoke only when explicitly requested to audit unpublished commits for PII.
 ---
 
