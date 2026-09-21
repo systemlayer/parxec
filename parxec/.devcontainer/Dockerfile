@@ -2,6 +2,12 @@ ARG VARIANT
 FROM mcr.microsoft.com/devcontainers/rust:${VARIANT}
 RUN rm /etc/sudoers.d/vscode
 
+RUN apt-get update &&\
+    export DEBIAN_FRONTEND=noninteractive &&\
+    apt-get install -y tmux &&\
+    apt-get clean &&\
+    rm -rf /var/lib/apt/lists/*
+
 # Temporarily switch user to install utilities.
 USER vscode
 RUN cargo install cargo-audit cargo-edit
