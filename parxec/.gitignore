@@ -1,0 +1,9 @@
+# Rust artifacts.
+debug/
+target/
+dist/
+**/*.rs.bk
+
+# Other files.
+prototype/
+*.ignore.txt
