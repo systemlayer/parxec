@@ -11,6 +11,7 @@ RUN apt-get update &&\
 # Temporarily switch user to install utilities.
 USER vscode
 RUN cargo install cargo-audit cargo-edit
+RUN printf 'set -g mouse on\n' > ~/.tmux.conf
 # Go back to the default Dockerfile user (can be checked with "whoami" during
 # build), terminal and other processes will still run as vscode.
 USER root
