@@ -7,7 +7,7 @@ use std::{
 };
 
 /// Shared hash-file format: top-level filenames mapped to hash strings.
-/// The JSON representation is a plain object compatible with prototype files.
+/// The JSON representation is a plain object compatible with files.
 pub type HashFile = BTreeMap<String, String>;
 
 /// Reads a hash file from JSON.

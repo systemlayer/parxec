@@ -4,12 +4,11 @@ use std::{
   path::{Path, PathBuf},
 };
 
-/// Returns sorted names of top-level regular files in `input_dir`.
+/// Returns sorted names of top-level regular files, relative to `input_dir`.
 ///
-/// Symlinks to regular files are included. A `file_limit` of zero selects all files;
-/// otherwise, the limit is applied after sorting. Returns an error if the directory
+/// Symlinks to regular files are included. Returns an error if the directory
 /// cannot be read, an entry cannot be inspected, or no files are found.
-pub fn discover_files(input_dir: &Path, file_limit: usize) -> anyhow::Result<Vec<PathBuf>> {
+pub fn discover_files(input_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
   let entries = fs::read_dir(input_dir)
     .with_context(|| format!("cannot read input directory {}", input_dir.display()))?;
   let mut files = Vec::new();
@@ -21,11 +20,8 @@ pub fn discover_files(input_dir: &Path, file_limit: usize) -> anyhow::Result<Vec
       files.push(PathBuf::from(entry.file_name()));
     }
   }
-  // Sorting deterministically makes processing order predictable, including which files a limit selects.
+  // Sorting deterministically makes processing order predictable.
   files.sort();
-  if file_limit > 0 {
-    files.truncate(file_limit);
-  }
   if files.is_empty() {
     bail!("input directory {} contains no files", input_dir.display());
   }
@@ -58,29 +54,28 @@ mod tests {
   }
 
   #[test]
-  fn sorts_before_limiting_and_ignores_subdirectories() {
+  fn sorts_and_ignores_subdirectories() {
     let dir = TestDir::new();
     fs::write(dir.0.join("c.png"), []).unwrap();
     fs::write(dir.0.join("a.png"), []).unwrap();
     fs::write(dir.0.join("b.png"), []).unwrap();
     fs::create_dir(dir.0.join("nested")).unwrap();
     fs::write(dir.0.join("nested").join("0.png"), []).unwrap();
-    assert_eq!(discover_files(&dir.0, 0).unwrap(), ["a.png", "b.png", "c.png"].map(PathBuf::from));
-    assert_eq!(discover_files(&dir.0, 2).unwrap(), ["a.png", "b.png"].map(PathBuf::from));
+    assert_eq!(discover_files(&dir.0).unwrap(), ["a.png", "b.png", "c.png"].map(PathBuf::from));
   }
 
   #[test]
   fn empty_input_is_an_error() {
     let dir = TestDir::new();
     assert!(
-      discover_files(&dir.0, 0)
+      discover_files(&dir.0)
         .unwrap_err()
         .to_string()
         .contains("contains no files")
     );
     fs::create_dir(dir.0.join("nested")).unwrap();
     assert!(
-      discover_files(&dir.0, 1)
+      discover_files(&dir.0)
         .unwrap_err()
         .to_string()
         .contains("contains no files")
@@ -94,7 +89,7 @@ mod tests {
       if path.ends_with("file") {
         fs::write(&path, []).unwrap();
       }
-      let error = discover_files(&path, 0).unwrap_err().to_string();
+      let error = discover_files(&path).unwrap_err().to_string();
       assert!(error.contains("cannot read input directory"));
       assert!(error.contains(&path.display().to_string()));
     }
@@ -106,7 +101,7 @@ mod tests {
     let dir = TestDir::new();
     fs::write(dir.0.join("target.png"), []).unwrap();
     std::os::unix::fs::symlink("target.png", dir.0.join("link.png")).unwrap();
-    assert_eq!(discover_files(&dir.0, 0).unwrap(), ["link.png", "target.png"].map(PathBuf::from));
+    assert_eq!(discover_files(&dir.0).unwrap(), ["link.png", "target.png"].map(PathBuf::from));
   }
 
   #[cfg(unix)]
@@ -117,7 +112,7 @@ mod tests {
     fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o000)).unwrap();
     let result = fs::read_dir(&dir.0);
     if result.is_err() {
-      let error = discover_files(&dir.0, 0).unwrap_err().to_string();
+      let error = discover_files(&dir.0).unwrap_err().to_string();
       assert!(error.contains("cannot read input directory"));
       assert!(error.contains(&dir.0.display().to_string()));
     }
