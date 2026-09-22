@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{ffi::OsString, num::NonZeroUsize, path::PathBuf};
 
 #[derive(Debug, Parser)]
-#[command(about = "Process image datasets and run commands in parallel")]
+#[command(about = "Process file collections and run commands in parallel")]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 pub struct Cli {
   #[command(subcommand)]
@@ -11,11 +11,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-  /// Compute image hashes and save them as JSON.
+  /// Compute file hashes and save them as JSON.
   Hash(HashArgs),
-  /// Analyze a JSON file of image hashes.
+  /// Analyze a JSON file containing hashes.
   Analyze(AnalyzeArgs),
-  /// Run an external command against image batches.
+  /// Run an external command against file batches.
   Run(RunArgs),
 }
 
@@ -28,20 +28,20 @@ pub enum HashAlgorithm {
 
 #[derive(Debug, Args)]
 pub struct HashOptions {
-  /// Algorithm used to hash resized images.
+  /// Algorithm used to hash files; perceptual hashing requires images.
   #[arg(short = 'a', long, value_enum, default_value_t = HashAlgorithm::Sha256)]
   pub hash_algorithm: HashAlgorithm,
   /// Number of hashing threads; 0 selects the automatic count.
   #[arg(short = 't', long, default_value_t = 0)]
   pub hash_threads: usize,
-  /// Width and height of the resized image in pixels.
+  /// Width and height of the resized image in pixels for perceptual hashing.
   #[arg(short = 'z', long, default_value = "8")]
   pub tile_size: NonZeroUsize,
 }
 
 #[derive(Debug, Args)]
 pub struct HashArgs {
-  /// Directory containing images to hash.
+  /// Directory containing files to hash.
   pub input_dir: PathBuf,
   /// JSON file to write the generated hashes to.
   #[arg(short = 'f', long, required = true)]
@@ -74,7 +74,7 @@ pub struct AnalyzeArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-  /// Directory containing images to process.
+  /// Directory containing files to process.
   pub input_dir: PathBuf,
   /// Directory for the external command's output.
   #[arg(short = 'o', long, required = true)]
@@ -116,7 +116,7 @@ mod tests {
   #[test]
   fn hash_parses_defaults_and_algorithms() {
     let cli =
-      Cli::try_parse_from(["parxec", "hash", "images", "--hash-output", "hashes.json"]).unwrap();
+      Cli::try_parse_from(["parxec", "hash", "files", "--hash-output", "hashes.json"]).unwrap();
     let Commands::Hash(args) = cli.command else {
       panic!("expected hash command")
     };
@@ -134,7 +134,7 @@ mod tests {
       let cli = Cli::try_parse_from([
         "parxec",
         "hash",
-        "images",
+        "files",
         "-f",
         "hashes.json",
         "--hash-algorithm",
@@ -179,7 +179,7 @@ mod tests {
     let cli = Cli::try_parse_from([
       "parxec",
       "run",
-      "images",
+      "files",
       "-o",
       "results",
       "--hash-input",
@@ -203,7 +203,7 @@ mod tests {
     let cli = Cli::try_parse_from([
       "parxec",
       "run",
-      "images",
+      "files",
       "-o",
       "results",
       "--",
@@ -220,15 +220,15 @@ mod tests {
   fn invalid_and_missing_arguments_are_rejected() {
     for args in [
       vec!["parxec"],
-      vec!["parxec", "hash", "images"],
+      vec!["parxec", "hash", "files"],
       vec!["parxec", "analyze"],
-      vec!["parxec", "run", "images", "-o", "results"],
-      vec!["parxec", "hash", "images", "-f", "hashes.json", "-j", "0"],
-      vec!["parxec", "hash", "images", "-f", "hashes.json", "-z", "0"],
+      vec!["parxec", "run", "files", "-o", "results"],
+      vec!["parxec", "hash", "files", "-f", "hashes.json", "-j", "0"],
+      vec!["parxec", "hash", "files", "-f", "hashes.json", "-z", "0"],
       vec![
         "parxec",
         "hash",
-        "images",
+        "files",
         "-f",
         "hashes.json",
         "-a",
