@@ -22,19 +22,18 @@ pub enum Commands {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum HashAlgorithm {
   Sha256,
-  Perceptual,
   Simple,
 }
 
 #[derive(Debug, Args)]
 pub struct HashOptions {
-  /// Algorithm used to hash files; perceptual hashing requires images.
+  /// Algorithm used to hash files; simple hashing requires images.
   #[arg(short = 'a', long, value_enum, default_value_t = HashAlgorithm::Sha256)]
   pub hash_algorithm: HashAlgorithm,
   /// Number of hashing threads; 0 selects the automatic count.
   #[arg(short = 't', long, default_value_t = 0)]
   pub hash_threads: usize,
-  /// Width and height of the resized image in pixels for perceptual hashing.
+  /// Width and height of the resized image in pixels for simple hashing.
   #[arg(short = 'z', long, default_value = "8")]
   pub tile_size: NonZeroUsize,
 }
@@ -128,7 +127,6 @@ mod tests {
     assert_eq!(args.file_ms, 50);
     for (value, expected) in [
       ("sha256", HashAlgorithm::Sha256),
-      ("perceptual", HashAlgorithm::Perceptual),
       ("simple", HashAlgorithm::Simple),
     ] {
       let cli = Cli::try_parse_from([
@@ -187,6 +185,8 @@ mod tests {
       "--batch-directories",
       "--hash-algorithm",
       "simple",
+      "--tile-size",
+      "12",
       "--",
       "processor",
       "--quality",
@@ -198,18 +198,11 @@ mod tests {
     };
     assert_eq!(args.hash_input, Some(PathBuf::from("hashes.json")));
     assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Simple);
+    assert_eq!(args.hashing.tile_size.get(), 12);
     assert!(args.batch_directories);
     assert_eq!(args.command, ["processor", "--quality", "2"].map(OsString::from));
-    let cli = Cli::try_parse_from([
-      "parxec",
-      "run",
-      "files",
-      "-o",
-      "results",
-      "--",
-      "processor",
-    ])
-    .unwrap();
+    let cli =
+      Cli::try_parse_from(["parxec", "run", "files", "-o", "results", "--", "processor"]).unwrap();
     let Commands::Run(args) = cli.command else {
       panic!("expected run command")
     };
