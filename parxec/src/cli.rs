@@ -28,7 +28,7 @@ pub enum HashAlgorithm {
 #[derive(Debug, Args)]
 pub struct HashOptions {
   /// Algorithm used to hash files; downsampled hashing requires images.
-  #[arg(short = 'a', long, value_enum, default_value_t = HashAlgorithm::Sha256)]
+  #[arg(short = 'a', long, value_enum, default_value_t = HashAlgorithm::Downsampled)]
   pub hash_algorithm: HashAlgorithm,
   /// Number of hashing threads; 0 selects the automatic count.
   #[arg(short = 't', long, default_value_t = 0)]
@@ -119,7 +119,7 @@ mod tests {
     let Commands::Hash(args) = cli.command else {
       panic!("expected hash command")
     };
-    assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Sha256);
+    assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Downsampled);
     assert_eq!(args.hashing.hash_threads, 0);
     assert_eq!(args.hashing.tile_size.get(), 8);
     assert_eq!(args.jobs.get(), 4);
@@ -207,6 +207,7 @@ mod tests {
       panic!("expected run command")
     };
     assert_eq!(args.hash_input, None);
+    assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Downsampled);
   }
 
   #[test]

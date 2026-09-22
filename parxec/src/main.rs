@@ -6,7 +6,7 @@ mod input;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use cli::{AnalyzeArgs, Cli, Commands, HashAlgorithm, HashArgs, RunArgs};
+use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
 use std::{collections::HashSet, fs, time::Instant};
 
 /// Hashes selected files and writes a JSON hash file.
@@ -72,6 +72,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::cli::HashAlgorithm;
 
   #[test]
   fn hash_writes_shared_format_and_excludes_existing_output() {
