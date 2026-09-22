@@ -54,8 +54,8 @@ pub struct HashArgs {
   /// Maximum number of files to process; 0 means unlimited.
   #[arg(short = 'l', long, default_value_t = 0)]
   pub file_limit: usize,
-  /// Estimated processing time per file in milliseconds.
-  #[arg(short = 'm', long, default_value_t = 1000)]
+  /// Estimated processing time per file in milliseconds; actual time may vary by workload.
+  #[arg(short = 'm', long, default_value_t = 50)]
   pub file_ms: u64,
 }
 
@@ -67,8 +67,8 @@ pub struct AnalyzeArgs {
   /// Number of parallel jobs used for estimates.
   #[arg(short = 'j', long, default_value = "4")]
   pub jobs: NonZeroUsize,
-  /// Estimated processing time per file in milliseconds.
-  #[arg(short = 'm', long, default_value_t = 1000)]
+  /// Estimated processing time per file in milliseconds; actual time may vary by workload.
+  #[arg(short = 'm', long, default_value_t = 50)]
   pub file_ms: u64,
 }
 
@@ -87,9 +87,6 @@ pub struct RunArgs {
   /// Number of parallel jobs to run.
   #[arg(short = 'j', long, default_value = "4")]
   pub jobs: NonZeroUsize,
-  /// Maximum number of files to process; 0 means unlimited.
-  #[arg(short = 'l', long, default_value_t = 0)]
-  pub file_limit: usize,
   /// Group input files into one batch directory per job.
   #[arg(short = 'd', long)]
   pub batch_directories: bool,
@@ -128,7 +125,7 @@ mod tests {
     assert_eq!(args.hashing.tile_size.get(), 8);
     assert_eq!(args.jobs.get(), 4);
     assert_eq!(args.file_limit, 0);
-    assert_eq!(args.file_ms, 1000);
+    assert_eq!(args.file_ms, 50);
     for (value, expected) in [
       ("sha256", HashAlgorithm::Sha256),
       ("perceptual", HashAlgorithm::Perceptual),
@@ -153,6 +150,11 @@ mod tests {
 
   #[test]
   fn analyze_parses_hash_input_and_estimates() {
+    let cli = Cli::try_parse_from(["parxec", "analyze", "--hash-input", "hashes.json"]).unwrap();
+    let Commands::Analyze(args) = cli.command else {
+      panic!("expected analyze command")
+    };
+    assert_eq!(args.file_ms, 50);
     let cli = Cli::try_parse_from([
       "parxec",
       "analyze",
