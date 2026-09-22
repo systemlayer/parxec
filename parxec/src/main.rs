@@ -11,14 +11,8 @@ use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
 use std::{fs, num::NonZeroUsize, time::Instant};
 
-/// Prints dataset counts and modeled processing time, separately from measured hashing time.
-fn print_statistics(
-  grouping: &grouping::Grouping,
-  jobs: NonZeroUsize,
-  file_ms: u64,
-  hashing_seconds: Option<f64>,
-) {
-  let stats = stat::calculate(grouping, jobs, file_ms);
+/// Prints file counts, duplicate percentages, and optional measured hashing time.
+fn print_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>) {
   println!("Files: {} total, {} distinct hashes.", stats.total_files, stats.distinct_hashes);
   println!("Duplicate groups: {}.", stats.duplicate_groups);
   println!(
@@ -29,7 +23,10 @@ fn print_statistics(
   if let Some(seconds) = hashing_seconds {
     println!("Hashing took {:.2}s.", seconds);
   }
-  println!();
+}
+
+/// Prints estimated processing times for all, distinct, and redundant files.
+fn print_processing_times(stats: &stat::Statistics, jobs: NonZeroUsize, file_ms: u64) {
   println!("Estimated processing at {}ms per file with {} jobs:", file_ms, jobs);
   println!("  All files: {:.2}s.", stats.estimated_all_seconds);
   println!("  Distinct files: {:.2}s.", stats.estimated_unique_seconds);
@@ -67,7 +64,10 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   let grouping = grouping::group(&hashes);
   println!("Saved hashes to {}.", args.hash_output.display());
   println!();
-  print_statistics(&grouping, args.jobs, args.file_ms, Some(elapsed.as_secs_f64()));
+  let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
+  print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
+  println!();
+  print_processing_times(&stats, args.jobs, args.file_ms);
   Ok(())
 }
 
@@ -75,7 +75,10 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
 fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   let hashes = hash_file::read(&args.hash_input)?;
   let grouping = grouping::group(&hashes);
-  print_statistics(&grouping, args.jobs, args.file_ms, None);
+  let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
+  print_file_statistics(&stats, None);
+  println!();
+  print_processing_times(&stats, args.jobs, args.file_ms);
   Ok(())
 }
 
