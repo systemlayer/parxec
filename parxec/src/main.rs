@@ -11,9 +11,6 @@ use std::{collections::HashSet, fs, time::Instant};
 
 /// Hashes selected files and writes a JSON hash file.
 fn hash(args: HashArgs) -> anyhow::Result<()> {
-  if args.hashing.hash_algorithm != HashAlgorithm::Sha256 {
-    bail!("hash algorithm {:?} is not implemented yet", args.hashing.hash_algorithm);
-  }
   let mut names = input::discover_files(&args.input_dir)?;
   if args.hash_output.exists() {
     let output = fs::canonicalize(&args.hash_output)
@@ -31,7 +28,13 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   }
   println!("Hashing {} files.", names.len());
   let start = Instant::now();
-  let hashes = hasher::hash_files(&args.input_dir, &names, args.hashing.hash_threads)?;
+  let hashes = hasher::hash_files(
+    &args.input_dir,
+    &names,
+    args.hashing.hash_threads,
+    args.hashing.hash_algorithm,
+    args.hashing.tile_size.get(),
+  )?;
   let elapsed = start.elapsed();
   hash_file::write(&args.hash_output, &hashes)?;
   let unique = hashes.values().collect::<HashSet<_>>().len();
@@ -104,8 +107,8 @@ mod tests {
   }
 
   #[test]
-  fn unsupported_algorithm_fails_before_writing() {
-    let dir = std::env::temp_dir().join(format!("parxec-unsupported-{}", std::process::id()));
+  fn decoding_failure_reports_path_without_writing() {
+    let dir = std::env::temp_dir().join(format!("parxec-invalid-image-{}", std::process::id()));
     fs::create_dir(&dir).unwrap();
     fs::write(dir.join("a.bin"), b"data").unwrap();
     let output = dir.join("hashes.json");
@@ -121,12 +124,9 @@ mod tests {
       file_limit: 0,
       file_ms: 1000,
     };
-    assert!(
-      hash(args)
-        .unwrap_err()
-        .to_string()
-        .contains("not implemented yet")
-    );
+    let error = hash(args).unwrap_err().to_string();
+    assert!(error.contains("cannot decode image"));
+    assert!(error.contains(&dir.join("a.bin").display().to_string()));
     assert!(!output.exists());
     fs::remove_dir_all(dir).unwrap();
   }

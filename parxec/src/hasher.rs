@@ -1,5 +1,6 @@
-use crate::hash_file::HashFile;
-use anyhow::Context;
+use crate::{cli::HashAlgorithm, hash_file::HashFile};
+use anyhow::{Context, ensure};
+use image::imageops::FilterType;
 use rayon::{ThreadPoolBuilder, prelude::*};
 use sha2::{Digest, Sha256};
 use std::{
@@ -36,14 +37,40 @@ pub fn sha256(path: &Path) -> anyhow::Result<String> {
   )
 }
 
+/// Decodes an image, resizes it to a square tile, and hashes its pixel bytes.
+///
+/// Similar to https://crates.io/crates/image_hasher, but it only resizes the
+/// image to avoid false positives. The goal is to find identical frames despite
+/// compression artifacts; a more perceptual algorithm could treat distinct
+/// frames as identical.
+pub fn downsampled(path: &Path, tile_size: usize) -> anyhow::Result<String> {
+  let size = u32::try_from(tile_size).context("tile size exceeds image dimensions")?;
+  ensure!(size > 0, "tile size must be positive");
+  let image =
+    image::open(path).with_context(|| format!("cannot decode image {}", path.display()))?;
+  // Nearest is the fastest filter and works well at small sizes (such as 8x8 or 128x128).
+  // See also https://docs.rs/image/0.24.9/image/imageops/enum.FilterType.html.
+  let pixels = image
+    .resize_exact(size, size, FilterType::Nearest)
+    .into_bytes();
+  let digest = Sha256::digest(pixels);
+  Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// Hashes named files in a dedicated Rayon pool and returns an in-memory map of
-/// filenames to SHA-256 digests.
+/// filenames to digests produced by the selected algorithm.
 ///
 /// A `threads` value of 0 lets Rayon choose the pool size, normally from the
 /// available logical CPUs unless `RAYON_NUM_THREADS` is set. A nonzero value
 /// requests that many worker threads; Rayon does not cap it to the CPU count,
 /// though its own maximum thread limit still applies.
-pub fn hash_files(input_dir: &Path, names: &[PathBuf], threads: usize) -> anyhow::Result<HashFile> {
+pub fn hash_files(
+  input_dir: &Path,
+  names: &[PathBuf],
+  threads: usize,
+  algorithm: HashAlgorithm,
+  tile_size: usize,
+) -> anyhow::Result<HashFile> {
   // Start with Rayon's default thread pool settings.
   let mut builder = ThreadPoolBuilder::new();
   // Apply the requested thread count when one was provided.
@@ -62,7 +89,12 @@ pub fn hash_files(input_dir: &Path, names: &[PathBuf], threads: usize) -> anyhow
         let key = name
           .to_str()
           .ok_or_else(|| anyhow::anyhow!("input filename {} is not valid UTF-8", name.display()))?;
-        Ok((key.to_owned(), sha256(&input_dir.join(name))?))
+        let path = input_dir.join(name);
+        let hash = match algorithm {
+          HashAlgorithm::Sha256 => sha256(&path)?,
+          HashAlgorithm::Downsampled => downsampled(&path, tile_size)?,
+        };
+        Ok((key.to_owned(), hash))
       })
       .collect::<anyhow::Result<Vec<_>>>()
   })?;
@@ -86,6 +118,18 @@ mod tests {
       sha256(&path).unwrap(),
       "47ffa3ea45a70b8a41c2c0825df323c00a8b7a01c1ea06083cc41dddcc001123"
     );
+    std::fs::remove_file(path).unwrap();
+  }
+
+  #[test]
+  fn hashes_resized_pixels() {
+    let path = std::env::temp_dir().join(format!("parxec-downsampled-{}.png", std::process::id()));
+    let image = image::RgbImage::from_pixel(2, 2, image::Rgb([12, 34, 56]));
+    image.save(&path).unwrap();
+    let expected = Sha256::digest([12, 34, 56]);
+    let expected: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(downsampled(&path, 1).unwrap(), expected);
+    assert_ne!(downsampled(&path, 2).unwrap(), expected);
     std::fs::remove_file(path).unwrap();
   }
 }
