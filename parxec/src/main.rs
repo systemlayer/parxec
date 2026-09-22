@@ -1,13 +1,40 @@
 #[allow(dead_code)]
 mod cli;
+mod grouping;
 mod hash_file;
 mod hasher;
 mod input;
+mod stat;
 
 use anyhow::{Context, bail};
 use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
-use std::{collections::HashSet, fs, time::Instant};
+use std::{fs, num::NonZeroUsize, time::Instant};
+
+/// Prints dataset counts and modeled processing time, separately from measured hashing time.
+fn print_statistics(
+  grouping: &grouping::Grouping,
+  jobs: NonZeroUsize,
+  file_ms: u64,
+  hashing_seconds: Option<f64>,
+) {
+  let stats = stat::calculate(grouping, jobs, file_ms);
+  println!("Files: {} total, {} distinct hashes.", stats.total_files, stats.distinct_hashes);
+  println!("Duplicate groups: {}.", stats.duplicate_groups);
+  println!(
+    "Files in duplicate groups: {} ({:.1}%).",
+    stats.duplicate_files, stats.duplicate_percent
+  );
+  println!("Redundant files: {} ({:.1}%).", stats.redundant_files, stats.redundant_percent);
+  if let Some(seconds) = hashing_seconds {
+    println!("Hashing took {:.2}s.", seconds);
+  }
+  println!();
+  println!("Estimated processing at {}ms per file with {} jobs:", file_ms, jobs);
+  println!("  All files: {:.2}s.", stats.estimated_all_seconds);
+  println!("  Distinct files: {:.2}s.", stats.estimated_unique_seconds);
+  println!("  Time saved: {:.2}s.", stats.estimated_saved_seconds);
+}
 
 /// Hashes selected files and writes a JSON hash file.
 fn hash(args: HashArgs) -> anyhow::Result<()> {
@@ -37,23 +64,19 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   )?;
   let elapsed = start.elapsed();
   hash_file::write(&args.hash_output, &hashes)?;
-  let unique = hashes.values().collect::<HashSet<_>>().len();
-  let redundant = hashes.len() - unique;
-  let estimate_unit = args.file_ms as f64 / 1000.0 / args.jobs.get() as f64;
+  let grouping = grouping::group(&hashes);
   println!("Saved hashes to {}.", args.hash_output.display());
   println!();
-  println!("Files: {} hashed, {} unique, {} redundant.", hashes.len(), unique, redundant);
-  println!("Hashing took {:.2}s.", elapsed.as_secs_f64());
-  println!();
-  println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
-  println!("  All files:     {:.2}s", hashes.len() as f64 * estimate_unit);
-  println!("  Unique files:  {:.2}s", unique as f64 * estimate_unit);
-  println!("  Time saved:    {:.2}s", redundant as f64 * estimate_unit);
+  print_statistics(&grouping, args.jobs, args.file_ms, Some(elapsed.as_secs_f64()));
   Ok(())
 }
 
-fn analyze(_args: AnalyzeArgs) -> anyhow::Result<()> {
-  anyhow::bail!("analyze is not implemented yet")
+/// Reads a saved hash file and reports its duplicate statistics and estimates.
+fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
+  let hashes = hash_file::read(&args.hash_input)?;
+  let grouping = grouping::group(&hashes);
+  print_statistics(&grouping, args.jobs, args.file_ms, None);
+  Ok(())
 }
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
