@@ -113,7 +113,7 @@ mod tests {
       input_dir: dir.clone(),
       hash_output: output.clone(),
       hashing: cli::HashOptions {
-        hash_algorithm: HashAlgorithm::Simple,
+        hash_algorithm: HashAlgorithm::Downsampled,
         hash_threads: 0,
         tile_size: std::num::NonZeroUsize::new(8).unwrap(),
       },
