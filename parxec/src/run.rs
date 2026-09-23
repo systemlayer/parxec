@@ -183,16 +183,15 @@ fn prepare_batches(
   Ok(batches)
 }
 
-/// Validates the output and prepares directory-batched work from resolved hashes.
+/// Validates the output and prepares directory-batched work from grouped files.
 pub fn prepare_plan(
   input_dir: &Path,
   output_dir: &Path,
   jobs: NonZeroUsize,
   command_elements: &[OsString],
-  hashes: &hash_file::HashFile,
+  grouping: grouping::Grouping,
 ) -> anyhow::Result<RunPlan> {
   validate_output_dir(output_dir)?;
-  let grouping = grouping::group(hashes);
   let mut representatives = grouping
     .groups
     .values()
@@ -266,7 +265,8 @@ mod tests {
   fn prepare(args: &RunArgs) -> anyhow::Result<RunPlan> {
     let names = input::discover_files(&args.input_dir)?;
     let hashes = resolve_hashes(args, &names)?;
-    prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, &hashes)
+    let grouping = grouping::group(&hashes);
+    prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)
   }
 
   #[test]
@@ -375,12 +375,13 @@ mod tests {
     run_args.hash_input = Some(hash_path.clone());
     let names = input::discover_files(&run_args.input_dir).unwrap();
     let resolved = resolve_hashes(&run_args, &names).unwrap();
+    let grouping = grouping::group(&resolved);
     let plan = prepare_plan(
       &run_args.input_dir,
       &run_args.output_dir,
       run_args.jobs,
       &run_args.command,
-      &resolved,
+      grouping,
     )
     .unwrap();
     assert_eq!(plan.batches.len(), 1);

@@ -87,9 +87,15 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
   println!("{args:?}");
   println!();
   let names = input::discover_files(&args.input_dir)?;
+  let start = Instant::now();
   let hashes = run::resolve_hashes(&args, &names)?;
+  let elapsed = start.elapsed();
+  let grouping = grouping::group(&hashes);
+  let stats = stat::calculate(&grouping, args.jobs, 0);
+  print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
+  println!();
   let plan =
-    run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, &hashes)?;
+    run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)?;
   if args.dry_run {
     return run::write_plan(std::io::stdout().lock(), &plan);
   }
