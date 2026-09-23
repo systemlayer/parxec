@@ -84,6 +84,8 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 }
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
+  println!("{args:?}");
+  println!();
   let names = input::discover_files(&args.input_dir)?;
   let hashes = run::resolve_hashes(&args, &names)?;
   let plan =
