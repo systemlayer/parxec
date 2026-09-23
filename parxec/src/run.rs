@@ -1,23 +1,27 @@
 use crate::{cli::RunArgs, grouping, hash_file, hasher, input};
 use anyhow::{Context, bail, ensure};
+use serde::{Serialize, Serializer, ser::Error};
 use std::{
   collections::BTreeMap,
   ffi::{OsStr, OsString},
   fs,
+  io::Write,
   path::{Path, PathBuf},
 };
 
 /// A program and its arguments, retained as separate operating-system strings.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct PreparedCommand {
   /// Executable invoked for this batch.
+  #[serde(serialize_with = "serialize_os_string")]
   pub program: OsString,
   /// Arguments passed directly to the executable, without shell parsing.
+  #[serde(serialize_with = "serialize_os_strings")]
   pub arguments: Vec<OsString>,
 }
 
 /// One nonempty set of representative files assigned to a staging directory.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct Batch {
   /// Staging directory from which the batch command reads its inputs.
   pub input_dir: PathBuf,
@@ -28,12 +32,42 @@ pub struct Batch {
 }
 
 /// Work prepared for future execution and duplicate-output reconstruction.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct RunPlan {
   /// Nonempty batches prepared for execution.
   pub batches: Vec<Batch>,
   /// Maps a duplicate file's relative path (key) to the processed file's relative path (value).
   pub redundant: BTreeMap<String, String>,
+}
+
+/// Serializes one operating-system string as a JSON string.
+fn serialize_os_string<S: Serializer>(value: &OsString, serializer: S) -> Result<S::Ok, S::Error> {
+  let value = value
+    .to_str()
+    .ok_or_else(|| S::Error::custom("command element is not valid UTF-8"))?;
+  serializer.serialize_str(value)
+}
+
+/// Serializes operating-system strings as a JSON string array.
+fn serialize_os_strings<S: Serializer>(
+  values: &[OsString],
+  serializer: S,
+) -> Result<S::Ok, S::Error> {
+  let values = values
+    .iter()
+    .map(|value| {
+      value
+        .to_str()
+        .ok_or_else(|| S::Error::custom("command element is not valid UTF-8"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+  values.serialize(serializer)
+}
+
+/// Writes a run plan as pretty JSON followed by a newline.
+pub fn write_plan(mut writer: impl Write, plan: &RunPlan) -> anyhow::Result<()> {
+  serde_json::to_writer_pretty(&mut writer, plan).context("cannot serialize run plan")?;
+  writer.write_all(b"\n").context("cannot write run plan")
 }
 
 /// Replaces supported directory placeholders in one UTF-8 command element.
@@ -204,6 +238,7 @@ mod tests {
         tile_size: NonZeroUsize::new(8).unwrap(),
       },
       jobs: NonZeroUsize::new(jobs).unwrap(),
+      dry_run: false,
       command: [
         "processor",
         "--input={input_dir}",
@@ -214,6 +249,29 @@ mod tests {
       .map(OsString::from)
       .to_vec(),
     }
+  }
+
+  #[test]
+  fn writes_pretty_json_with_a_final_newline() {
+    let plan = RunPlan {
+      batches: vec![Batch {
+        input_dir: PathBuf::from("input/.parxec-batch-0"),
+        files: vec![PathBuf::from("a.bin")],
+        command: PreparedCommand {
+          program: OsString::from("processor"),
+          arguments: vec![OsString::from("--output=results")],
+        },
+      }],
+      redundant: BTreeMap::from([("b.bin".into(), "a.bin".into())]),
+    };
+    let mut output = Vec::new();
+    write_plan(&mut output, &plan).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.ends_with("\n"));
+    assert!(text.contains("\n  \"batches\": [\n"));
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["batches"][0]["command"]["program"], "processor");
+    assert_eq!(json["redundant"]["b.bin"], "a.bin");
   }
 
   #[test]

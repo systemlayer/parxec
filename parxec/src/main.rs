@@ -85,6 +85,9 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
   let plan = run::prepare_plan(&args)?;
+  if args.dry_run {
+    return run::write_plan(std::io::stdout().lock(), &plan);
+  }
   // TODO: Execute the planned jobs in a Tokio runtime.
   drop(plan);
   anyhow::bail!("run is not implemented yet")

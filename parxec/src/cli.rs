@@ -86,6 +86,9 @@ pub struct RunArgs {
   /// Number of parallel jobs to run.
   #[arg(short = 'j', long, default_value = "4")]
   pub jobs: NonZeroUsize,
+  /// Compute and print the execution plan without running it.
+  #[arg(short = 'n', long)]
+  pub dry_run: bool,
   /// Program and arguments to execute, following `--`.
   #[arg(last = true, required = true, num_args = 1..)]
   pub command: Vec<OsString>,
@@ -183,6 +186,7 @@ mod tests {
       "downsampled",
       "--tile-size",
       "12",
+      "--dry-run",
       "--",
       "processor",
       "--quality",
@@ -195,6 +199,7 @@ mod tests {
     assert_eq!(args.hash_input, Some(PathBuf::from("hashes.json")));
     assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Downsampled);
     assert_eq!(args.hashing.tile_size.get(), 12);
+    assert!(args.dry_run);
     assert_eq!(args.command, ["processor", "--quality", "2"].map(OsString::from));
     let cli =
       Cli::try_parse_from(["parxec", "run", "files", "-o", "results", "--", "processor"]).unwrap();
@@ -203,6 +208,22 @@ mod tests {
     };
     assert_eq!(args.hash_input, None);
     assert_eq!(args.hashing.hash_algorithm, HashAlgorithm::Downsampled);
+    assert!(!args.dry_run);
+    let cli = Cli::try_parse_from([
+      "parxec",
+      "run",
+      "files",
+      "-o",
+      "results",
+      "-n",
+      "--",
+      "processor",
+    ])
+    .unwrap();
+    let Commands::Run(args) = cli.command else {
+      panic!("expected run command")
+    };
+    assert!(args.dry_run);
   }
 
   #[test]
