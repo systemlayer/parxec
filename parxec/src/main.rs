@@ -86,7 +86,8 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 fn run(args: RunArgs) -> anyhow::Result<()> {
   let names = input::discover_files(&args.input_dir)?;
   let hashes = run::resolve_hashes(&args, &names)?;
-  let plan = run::prepare_plan(&args, &hashes)?;
+  let plan =
+    run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, &hashes)?;
   if args.dry_run {
     return run::write_plan(std::io::stdout().lock(), &plan);
   }

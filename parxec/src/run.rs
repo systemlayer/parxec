@@ -6,6 +6,7 @@ use std::{
   ffi::{OsStr, OsString},
   fs,
   io::Write,
+  num::NonZeroUsize,
   path::{Path, PathBuf},
 };
 
@@ -152,10 +153,16 @@ fn prepare_command(
 }
 
 /// Assigns equal-sized batches and places remaining representatives in the last batch.
-fn prepare_batches(args: &RunArgs, representatives: &[PathBuf]) -> anyhow::Result<Vec<Batch>> {
-  let batch_count = args.jobs.get().min(representatives.len());
+fn prepare_batches(
+  input_dir: &Path,
+  output_dir: &Path,
+  jobs: NonZeroUsize,
+  command_elements: &[OsString],
+  representatives: &[PathBuf],
+) -> anyhow::Result<Vec<Batch>> {
+  let batch_count = jobs.get().min(representatives.len());
   let files_per_batch = representatives.len() / batch_count;
-  let width = args.jobs.get().to_string().len();
+  let width = jobs.get().to_string().len();
   let mut batches = Vec::with_capacity(batch_count);
   for index in 0..batch_count {
     let start = index * files_per_batch;
@@ -165,10 +172,8 @@ fn prepare_batches(args: &RunArgs, representatives: &[PathBuf]) -> anyhow::Resul
       start + files_per_batch
     };
     let files = representatives[start..end].to_vec();
-    let input_dir = args
-      .input_dir
-      .join(format!(".parxec-batch-{index:0width$}"));
-    let command = prepare_command(&args.command, &input_dir, &args.output_dir)?;
+    let input_dir = input_dir.join(format!(".parxec-batch-{index:0width$}"));
+    let command = prepare_command(command_elements, &input_dir, output_dir)?;
     batches.push(Batch {
       input_dir,
       files,
@@ -179,8 +184,14 @@ fn prepare_batches(args: &RunArgs, representatives: &[PathBuf]) -> anyhow::Resul
 }
 
 /// Validates the output and prepares directory-batched work from resolved hashes.
-pub fn prepare_plan(args: &RunArgs, hashes: &hash_file::HashFile) -> anyhow::Result<RunPlan> {
-  validate_output_dir(&args.output_dir)?;
+pub fn prepare_plan(
+  input_dir: &Path,
+  output_dir: &Path,
+  jobs: NonZeroUsize,
+  command_elements: &[OsString],
+  hashes: &hash_file::HashFile,
+) -> anyhow::Result<RunPlan> {
+  validate_output_dir(output_dir)?;
   let grouping = grouping::group(hashes);
   let mut representatives = grouping
     .groups
@@ -188,7 +199,7 @@ pub fn prepare_plan(args: &RunArgs, hashes: &hash_file::HashFile) -> anyhow::Res
     .filter_map(|names| names.first().map(PathBuf::from))
     .collect::<Vec<_>>();
   representatives.sort();
-  let batches = prepare_batches(args, &representatives)?;
+  let batches = prepare_batches(input_dir, output_dir, jobs, command_elements, &representatives)?;
   Ok(RunPlan {
     batches,
     redundant: grouping.redundant,
@@ -255,7 +266,7 @@ mod tests {
   fn prepare(args: &RunArgs) -> anyhow::Result<RunPlan> {
     let names = input::discover_files(&args.input_dir)?;
     let hashes = resolve_hashes(args, &names)?;
-    prepare_plan(args, &hashes)
+    prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, &hashes)
   }
 
   #[test]
@@ -333,7 +344,14 @@ mod tests {
     run_args.hash_input = Some(hash_path.clone());
     let names = input::discover_files(&run_args.input_dir).unwrap();
     let resolved = resolve_hashes(&run_args, &names).unwrap();
-    let plan = prepare_plan(&run_args, &resolved).unwrap();
+    let plan = prepare_plan(
+      &run_args.input_dir,
+      &run_args.output_dir,
+      run_args.jobs,
+      &run_args.command,
+      &resolved,
+    )
+    .unwrap();
     assert_eq!(plan.batches.len(), 1);
     assert_eq!(plan.batches[0].files, [PathBuf::from("a.bin")]);
     assert_eq!(plan.redundant["b.bin"], "a.bin");
