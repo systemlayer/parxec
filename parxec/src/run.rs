@@ -172,7 +172,7 @@ fn prepare_batches(
       start + files_per_batch
     };
     let files = representatives[start..end].to_vec();
-    let input_dir = input_dir.join(format!(".parxec-batch-{index:0width$}"));
+    let input_dir = input_dir.join(format!("parxec-batch-{index:0width$}"));
     let command = prepare_command(command_elements, &input_dir, output_dir)?;
     batches.push(Batch {
       input_dir,
@@ -273,7 +273,7 @@ mod tests {
   fn writes_pretty_json_with_a_final_newline() {
     let plan = RunPlan {
       batches: vec![Batch {
-        input_dir: PathBuf::from("input/.parxec-batch-0"),
+        input_dir: PathBuf::from("input/parxec-batch-0"),
         files: vec![PathBuf::from("a.bin")],
         command: PreparedCommand {
           program: OsString::from("processor"),
@@ -349,7 +349,7 @@ mod tests {
     assert!(
       plan.batches[0].command.arguments[0]
         .to_string_lossy()
-        .contains(".parxec-batch-0")
+        .contains("parxec-batch-0")
     );
     assert!(!plan.batches[0].input_dir.exists());
     assert_eq!(input::discover_files(&input_dir).unwrap().len(), 10);
