@@ -99,9 +99,10 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
   if args.dry_run {
     return run::write_plan(std::io::stdout().lock(), &plan);
   }
-  // TODO: Execute the planned jobs in a Tokio runtime.
-  drop(plan);
-  anyhow::bail!("run is not implemented yet")
+  run::with_staged_batches(&args.input_dir, &plan, || {
+    // TODO: Execute the planned jobs in a Tokio runtime.
+    anyhow::bail!("run is not implemented yet")
+  })
 }
 
 fn main() -> anyhow::Result<()> {

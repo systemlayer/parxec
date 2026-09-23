@@ -41,6 +41,84 @@ pub struct RunPlan {
   pub redundant: BTreeMap<String, String>,
 }
 
+/// Batch directories created for one run and removed when staging ends.
+struct StagedBatches {
+  directories: Vec<PathBuf>,
+}
+
+impl StagedBatches {
+  /// Creates and populates all batch directories, rolling them back on failure.
+  fn create(input_dir: &Path, batches: &[Batch]) -> anyhow::Result<Self> {
+    let mut staged = Self {
+      directories: Vec::with_capacity(batches.len()),
+    };
+    if let Err(error) = staged.populate(input_dir, batches) {
+      return match staged.cleanup() {
+        Ok(()) => Err(error),
+        Err(cleanup) => Err(error.context(format!("additionally, {cleanup:#}"))),
+      };
+    }
+    Ok(staged)
+  }
+
+  /// Creates each batch directory and hardlinks its representative files into it.
+  fn populate(&mut self, input_dir: &Path, batches: &[Batch]) -> anyhow::Result<()> {
+    for batch in batches {
+      fs::create_dir(&batch.input_dir)
+        .with_context(|| format!("cannot create batch directory {}", batch.input_dir.display()))?;
+      self.directories.push(batch.input_dir.clone());
+      for file in &batch.files {
+        let file_name = file
+          .file_name()
+          .with_context(|| format!("input path {} has no filename", file.display()))?;
+        let source = input_dir.join(file);
+        let destination = batch.input_dir.join(file_name);
+        fs::hard_link(&source, &destination).with_context(|| {
+          format!("cannot hardlink {} to {}", source.display(), destination.display())
+        })?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Removes every batch directory created by this staging lifecycle.
+  fn cleanup(&mut self) -> anyhow::Result<()> {
+    let mut first_error = None;
+    for directory in self.directories.drain(..).rev() {
+      if let Err(error) = fs::remove_dir_all(&directory) {
+        first_error.get_or_insert_with(|| {
+          anyhow::Error::new(error)
+            .context(format!("cannot remove batch directory {}", directory.display()))
+        });
+      }
+    }
+    first_error.map_or(Ok(()), Err)
+  }
+}
+
+impl Drop for StagedBatches {
+  fn drop(&mut self) {
+    self.cleanup().ok();
+  }
+}
+
+/// Stages planned hardlinks while an operation runs and cleans them afterward.
+pub fn with_staged_batches<T>(
+  input_dir: &Path,
+  plan: &RunPlan,
+  operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+  let mut staged = StagedBatches::create(input_dir, &plan.batches)?;
+  let result = operation();
+  let cleanup = staged.cleanup();
+  match (result, cleanup) {
+    (Ok(value), Ok(())) => Ok(value),
+    (Err(error), Ok(())) => Err(error),
+    (Ok(_), Err(error)) => Err(error),
+    (Err(error), Err(cleanup)) => Err(error.context(format!("additionally, {cleanup:#}"))),
+  }
+}
+
 /// Serializes one operating-system string as a JSON string.
 fn serialize_os_string<S: Serializer>(value: &OsString, serializer: S) -> Result<S::Ok, S::Error> {
   let value = value
@@ -353,6 +431,85 @@ mod tests {
     );
     assert!(!plan.batches[0].input_dir.exists());
     assert_eq!(input::discover_files(&input_dir).unwrap().len(), 10);
+  }
+
+  #[test]
+  fn stages_hardlinks_and_cleans_up_after_success() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), b"first").unwrap();
+    fs::write(input_dir.join("b.bin"), b"second").unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir, 2)).unwrap();
+    let batch_dirs = plan
+      .batches
+      .iter()
+      .map(|batch| batch.input_dir.clone())
+      .collect::<Vec<_>>();
+    with_staged_batches(&input_dir, &plan, || {
+      for batch in &plan.batches {
+        assert_eq!(fs::read_dir(&batch.input_dir).unwrap().count(), batch.files.len());
+        for file in &batch.files {
+          let staged = batch.input_dir.join(file.file_name().unwrap());
+          assert_eq!(fs::read(&staged).unwrap(), fs::read(input_dir.join(file)).unwrap());
+          #[cfg(unix)]
+          {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+              fs::metadata(staged).unwrap().ino(),
+              fs::metadata(input_dir.join(file)).unwrap().ino()
+            );
+          }
+        }
+      }
+      Ok(())
+    })
+    .unwrap();
+    assert!(batch_dirs.iter().all(|directory| !directory.exists()));
+    assert!(input_dir.join("a.bin").exists());
+    assert!(input_dir.join("b.bin").exists());
+  }
+
+  #[test]
+  fn cleans_up_staged_batches_after_operation_failure() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), b"first").unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir, 1)).unwrap();
+    let batch_dir = plan.batches[0].input_dir.clone();
+    let error = with_staged_batches(&input_dir, &plan, || -> anyhow::Result<()> {
+      assert!(batch_dir.join("a.bin").exists());
+      anyhow::bail!("operation failed")
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("operation failed"));
+    assert!(!batch_dir.exists());
+    assert!(input_dir.join("a.bin").exists());
+  }
+
+  #[test]
+  fn rolls_back_partial_staging_without_removing_preexisting_paths() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), b"first").unwrap();
+    fs::write(input_dir.join("b.bin"), b"second").unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir, 2)).unwrap();
+    let created_dir = plan.batches[0].input_dir.clone();
+    let preexisting_dir = plan.batches[1].input_dir.clone();
+    fs::create_dir(&preexisting_dir).unwrap();
+    fs::write(preexisting_dir.join("keep"), []).unwrap();
+    let error = with_staged_batches(&input_dir, &plan, || Ok(())).unwrap_err();
+    assert!(error.to_string().contains("cannot create batch directory"));
+    assert!(!created_dir.exists());
+    assert!(preexisting_dir.join("keep").exists());
   }
 
   #[test]
