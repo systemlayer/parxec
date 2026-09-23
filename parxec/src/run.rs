@@ -293,6 +293,37 @@ mod tests {
   }
 
   #[test]
+  fn distributes_representatives_across_job_counts() {
+    let cases: &[(usize, usize, &[usize])] = &[
+      (1, 4, &[4]),
+      (2, 4, &[2, 2]),
+      (3, 8, &[2, 2, 4]),
+      (3, 3, &[1, 1, 1]),
+      (5, 3, &[1, 1, 1]),
+    ];
+    for &(jobs, representative_count, expected_sizes) in cases {
+      let representatives = (0..representative_count)
+        .map(|index| PathBuf::from(format!("{index}.bin")))
+        .collect::<Vec<_>>();
+      let batches = prepare_batches(
+        Path::new("input"),
+        Path::new("output"),
+        NonZeroUsize::new(jobs).unwrap(),
+        &[OsString::from("processor")],
+        &representatives,
+      )
+      .unwrap();
+      let mut start = 0;
+      for (batch, &expected_size) in batches.iter().zip(expected_sizes) {
+        assert_eq!(batch.files, representatives[start..start + expected_size]);
+        start += expected_size;
+      }
+      assert_eq!(batches.len(), expected_sizes.len());
+      assert_eq!(start, representatives.len());
+    }
+  }
+
+  #[test]
   fn places_remaining_files_in_last_batch_and_preserves_arguments() {
     let root = TestDir::new();
     let input_dir = root.0.join("input");
