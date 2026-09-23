@@ -1,4 +1,4 @@
-use crate::{cli::RunArgs, grouping, hash_file, hasher, input};
+use crate::{cli::RunArgs, grouping, hash_file, hasher};
 use anyhow::{Context, bail, ensure};
 use serde::{Serialize, Serializer, ser::Error};
 use std::{
@@ -102,7 +102,7 @@ fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Loads supplied hashes or computes hashes for all selected input files.
-fn resolve_hashes(args: &RunArgs, names: &[PathBuf]) -> anyhow::Result<hash_file::HashFile> {
+pub fn resolve_hashes(args: &RunArgs, names: &[PathBuf]) -> anyhow::Result<hash_file::HashFile> {
   if let Some(path) = &args.hash_input {
     let supplied = hash_file::read(path)?;
     let mut selected = hash_file::HashFile::new();
@@ -178,12 +178,10 @@ fn prepare_batches(args: &RunArgs, representatives: &[PathBuf]) -> anyhow::Resul
   Ok(batches)
 }
 
-/// Validates inputs and prepares all directory-batched work for a future executor.
-pub fn prepare_plan(args: &RunArgs) -> anyhow::Result<RunPlan> {
+/// Validates the output and prepares directory-batched work from resolved hashes.
+pub fn prepare_plan(args: &RunArgs, hashes: &hash_file::HashFile) -> anyhow::Result<RunPlan> {
   validate_output_dir(&args.output_dir)?;
-  let names = input::discover_files(&args.input_dir)?;
-  let hashes = resolve_hashes(args, &names)?;
-  let grouping = grouping::group(&hashes);
+  let grouping = grouping::group(hashes);
   let mut representatives = grouping
     .groups
     .values()
@@ -200,7 +198,10 @@ pub fn prepare_plan(args: &RunArgs) -> anyhow::Result<RunPlan> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::cli::{HashAlgorithm, HashOptions};
+  use crate::{
+    cli::{HashAlgorithm, HashOptions},
+    input,
+  };
   use std::{
     num::NonZeroUsize,
     sync::atomic::{AtomicU64, Ordering},
@@ -251,6 +252,12 @@ mod tests {
     }
   }
 
+  fn prepare(args: &RunArgs) -> anyhow::Result<RunPlan> {
+    let names = input::discover_files(&args.input_dir)?;
+    let hashes = resolve_hashes(args, &names)?;
+    prepare_plan(args, &hashes)
+  }
+
   #[test]
   fn writes_pretty_json_with_a_final_newline() {
     let plan = RunPlan {
@@ -284,7 +291,7 @@ mod tests {
     for index in 0..10 {
       fs::write(input_dir.join(format!("{index:02}.bin")), [index]).unwrap();
     }
-    let plan = prepare_plan(&args(input_dir.clone(), output_dir.clone(), 6)).unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir.clone(), 6)).unwrap();
     assert_eq!(
       plan
         .batches
@@ -324,13 +331,15 @@ mod tests {
     hash_file::write(&hash_path, &hashes).unwrap();
     let mut run_args = args(input_dir, output_dir, 4);
     run_args.hash_input = Some(hash_path.clone());
-    let plan = prepare_plan(&run_args).unwrap();
+    let names = input::discover_files(&run_args.input_dir).unwrap();
+    let resolved = resolve_hashes(&run_args, &names).unwrap();
+    let plan = prepare_plan(&run_args, &resolved).unwrap();
     assert_eq!(plan.batches.len(), 1);
     assert_eq!(plan.batches[0].files, [PathBuf::from("a.bin")]);
     assert_eq!(plan.redundant["b.bin"], "a.bin");
     let hashes = hash_file::HashFile::from([("a.bin".into(), "same".into())]);
     hash_file::write(&hash_path, &hashes).unwrap();
-    let error = prepare_plan(&run_args).unwrap_err().to_string();
+    let error = resolve_hashes(&run_args, &names).unwrap_err().to_string();
     assert!(error.contains("missing entries for: b.bin"));
   }
 
@@ -341,16 +350,16 @@ mod tests {
     fs::create_dir(&input_dir).unwrap();
     fs::write(input_dir.join("a.bin"), []).unwrap();
     let missing = root.0.join("missing");
-    let error = prepare_plan(&args(input_dir.clone(), missing, 1)).unwrap_err();
+    let error = prepare(&args(input_dir.clone(), missing, 1)).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_file = root.0.join("file");
     fs::write(&output_file, []).unwrap();
-    let error = prepare_plan(&args(input_dir.clone(), output_file, 1)).unwrap_err();
+    let error = prepare(&args(input_dir.clone(), output_file, 1)).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_dir = root.0.join("output");
     fs::create_dir(&output_dir).unwrap();
     fs::write(output_dir.join("old.bin"), []).unwrap();
-    let error = prepare_plan(&args(input_dir, output_dir, 1)).unwrap_err();
+    let error = prepare(&args(input_dir, output_dir, 1)).unwrap_err();
     assert!(error.to_string().contains("is not empty"));
   }
 
@@ -364,7 +373,7 @@ mod tests {
     for index in 0..3 {
       fs::write(input_dir.join(format!("{index}.bin")), [index]).unwrap();
     }
-    let plan = prepare_plan(&args(input_dir, output_dir, 8)).unwrap();
+    let plan = prepare(&args(input_dir, output_dir, 8)).unwrap();
     assert_eq!(plan.batches.len(), 3);
     assert!(plan.batches.iter().all(|batch| batch.files.len() == 1));
   }
