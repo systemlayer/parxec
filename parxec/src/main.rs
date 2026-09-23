@@ -4,6 +4,7 @@ mod grouping;
 mod hash_file;
 mod hasher;
 mod input;
+mod run;
 mod stat;
 
 use anyhow::{Context, bail};
@@ -83,7 +84,9 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 }
 
 fn run(args: RunArgs) -> anyhow::Result<()> {
-  input::discover_files(&args.input_dir)?;
+  let plan = run::prepare_plan(&args)?;
+  // TODO: Execute the planned jobs in a Tokio runtime.
+  drop(plan);
   anyhow::bail!("run is not implemented yet")
 }
 
