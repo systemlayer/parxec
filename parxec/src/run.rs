@@ -1,14 +1,38 @@
 use crate::{cli::RunArgs, grouping, hash_file, hasher};
 use anyhow::{Context, bail, ensure};
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Serialize, Serializer, ser::Error};
 use std::{
-  collections::BTreeMap,
+  collections::{BTreeMap, VecDeque},
   ffi::{OsStr, OsString},
   fs,
-  io::Write,
+  future::Future,
+  io::{ErrorKind, Write},
   num::NonZeroUsize,
   path::{Path, PathBuf},
+  process::{ExitStatus, Stdio},
+  sync::Arc,
+  time::Duration,
 };
+use tokio::{
+  io::{AsyncBufReadExt, AsyncRead, BufReader},
+  process::{Child, Command},
+  sync::{Mutex, watch},
+  task::{JoinHandle, JoinSet},
+  time::{self, MissedTickBehavior},
+};
+
+/// Maximum number of combined output lines retained for a failed batch.
+const ERROR_OUTPUT_LINES: usize = 50;
+
+/// Delay between non-recursive output directory scans.
+const OUTPUT_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Refresh rate for elapsed time and progress rendering between directory scans.
+const PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Layout of the single progress bar displayed during batch execution.
+const PROGRESS_TEMPLATE: &str = "{elapsed_precise} [{wide_bar:.cyan/blue}] {percent:>3}% | {msg} output files | {len} representative files";
 
 /// A program and its arguments, retained as separate operating-system strings.
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -39,6 +63,16 @@ pub struct RunPlan {
   pub batches: Vec<Batch>,
   /// Maps a duplicate file's relative path (key) to the processed file's relative path (value).
   pub redundant: BTreeMap<String, String>,
+}
+
+/// Completion details from one asynchronously monitored batch process.
+struct BatchResult {
+  /// Zero-based position of the batch in the run plan.
+  batch_index: usize,
+  /// Process exit status, or `None` when cancellation terminated the process.
+  status: Option<ExitStatus>,
+  /// Bounded combined tail of the process's stdout and stderr.
+  output_tail: VecDeque<Vec<u8>>,
 }
 
 /// Batch directories created for one run and removed when staging ends.
@@ -103,19 +137,237 @@ impl Drop for StagedBatches {
 }
 
 /// Stages planned hardlinks while an operation runs and cleans them afterward.
-pub fn with_staged_batches<T>(
+pub async fn with_staged_batches<T>(
   input_dir: &Path,
   plan: &RunPlan,
-  operation: impl FnOnce() -> anyhow::Result<T>,
+  operation: impl Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
   let mut staged = StagedBatches::create(input_dir, &plan.batches)?;
-  let result = operation();
+  let result = operation.await;
   let cleanup = staged.cleanup();
   match (result, cleanup) {
     (Ok(value), Ok(())) => Ok(value),
     (Err(error), Ok(())) => Err(error),
     (Ok(_), Err(error)) => Err(error),
     (Err(error), Err(cleanup)) => Err(error.context(format!("additionally, {cleanup:#}"))),
+  }
+}
+
+/// Adds completed lines to a shared tail while discarding older process output.
+///
+/// `Arc` shares the tail between stdout and stderr tasks, `Mutex` serializes their updates,
+/// and `VecDeque<Vec<u8>>` provides FIFO eviction while preserving non-UTF-8 output bytes.
+async fn drain_output(
+  reader: impl AsyncRead + Unpin,
+  output_tail: Arc<Mutex<VecDeque<Vec<u8>>>>,
+) -> anyhow::Result<()> {
+  // Buffer each pipe so output can be retained one complete line at a time.
+  let mut reader = BufReader::new(reader);
+  loop {
+    // Read through the delimiter and stop normally when the child closes the pipe.
+    let mut line = Vec::new();
+    if reader
+      .read_until(b'\n', &mut line)
+      .await
+      .context("cannot read batch output")?
+      == 0
+    {
+      return Ok(());
+    }
+    // Serialize stdout/stderr arrivals into one tail and evict its oldest line at capacity.
+    let mut output_tail = output_tail.lock().await;
+    if output_tail.len() == ERROR_OUTPUT_LINES {
+      output_tail.pop_front();
+    }
+    // Preserve the original bytes so invalid UTF-8 remains available for lossy error reporting.
+    output_tail.push_back(line);
+  }
+}
+
+/// Propagates output-reader errors and unexpected task termination.
+async fn join_output_task(task: JoinHandle<anyhow::Result<()>>) -> anyhow::Result<()> {
+  task.await.context("batch output reader task failed")?
+}
+
+/// Waits for one child while draining its output and honoring run cancellation.
+async fn monitor_batch(
+  batch_index: usize,
+  mut child: Child,
+  mut cancellation: watch::Receiver<bool>,
+) -> anyhow::Result<BatchResult> {
+  let stdout = child
+    .stdout
+    .take()
+    .expect("batch stdout should be piped before monitoring");
+  let stderr = child
+    .stderr
+    .take()
+    .expect("batch stderr should be piped before monitoring");
+  let output_tail = Arc::new(Mutex::new(VecDeque::with_capacity(ERROR_OUTPUT_LINES)));
+  let stdout_task = tokio::spawn(drain_output(stdout, Arc::clone(&output_tail)));
+  let stderr_task = tokio::spawn(drain_output(stderr, Arc::clone(&output_tail)));
+  let status: Option<ExitStatus> = tokio::select! {
+    status = child.wait() => Some(status.context("cannot wait for batch process")?),
+    changed = cancellation.changed() => {
+      changed.context("batch cancellation channel closed unexpectedly")?;
+      child.kill().await.context("cannot terminate batch process")?;
+      None
+    }
+  };
+  join_output_task(stdout_task).await?;
+  join_output_task(stderr_task).await?;
+  let output_tail = Arc::try_unwrap(output_tail)
+    .map_err(|_| anyhow::anyhow!("batch output tail still has active readers"))?
+    .into_inner();
+  Ok(BatchResult {
+    batch_index,
+    status,
+    output_tail,
+  })
+}
+
+/// Counts top-level paths resolving to regular files without changing the directory.
+async fn count_output_files(output_dir: &Path) -> anyhow::Result<u64> {
+  let mut entries = tokio::fs::read_dir(output_dir)
+    .await
+    .with_context(|| format!("cannot read output directory {}", output_dir.display()))?;
+  let mut count = 0;
+  while let Some(entry) = entries
+    .next_entry()
+    .await
+    .with_context(|| format!("cannot read entry in output directory {}", output_dir.display()))?
+  {
+    match tokio::fs::metadata(entry.path()).await {
+      Ok(metadata) if metadata.is_file() => count += 1,
+      Ok(_) => {}
+      Err(error) if error.kind() == ErrorKind::NotFound => {}
+      Err(error) => {
+        return Err(error)
+          .context(format!("cannot inspect output path {}", entry.path().display()));
+      }
+    }
+  }
+  Ok(count)
+}
+
+/// Updates both the bounded bar position and the uncapped observed file count.
+fn update_progress(progress: &ProgressBar, output_files: u64, representatives: u64) {
+  progress.set_position(output_files.min(representatives));
+  progress.set_message(output_files.to_string());
+}
+
+/// Formats a failed status and the configured tail of combined process output.
+fn batch_exit_error(result: BatchResult) -> anyhow::Error {
+  let status = result
+    .status
+    .expect("failed batch should have an exit status");
+  let mut message = format!("batch {} command exited with {status}", result.batch_index + 1);
+  if !result.output_tail.is_empty() {
+    message.push_str(&format!("\nlast {} lines of stdout/stderr:\n", result.output_tail.len()));
+    for line in result.output_tail {
+      message.push_str(&String::from_utf8_lossy(&line));
+      if !line.ends_with(b"\n") {
+        message.push('\n');
+      }
+    }
+  }
+  anyhow::anyhow!(message.trim_end().to_owned())
+}
+
+/// Cancels all active batches and waits until their worker tasks have ended.
+async fn cancel_batches(
+  cancellation: &watch::Sender<bool>,
+  tasks: &mut JoinSet<anyhow::Result<BatchResult>>,
+) {
+  cancellation.send_replace(true);
+  while tasks.join_next().await.is_some() {}
+}
+
+/// Executes every planned batch concurrently and reports output-file progress.
+pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<()> {
+  let total_representatives = plan
+    .batches
+    .iter()
+    .map(|batch| batch.files.len() as u64)
+    .sum();
+  let progress = ProgressBar::new(total_representatives);
+  let style =
+    ProgressStyle::with_template(PROGRESS_TEMPLATE).context("invalid progress template")?;
+  progress.set_style(style.progress_chars("=>-"));
+  progress.enable_steady_tick(PROGRESS_TICK_INTERVAL);
+
+  // Share one cancellation signal across all batch monitors and collect their results together.
+  let (cancellation, cancellation_receiver) = watch::channel(false);
+  let mut tasks = JoinSet::new();
+
+  // Launch every batch concurrently, cancelling already-running batches if a later launch fails.
+  for (batch_index, batch) in plan.batches.iter().enumerate() {
+    let child = Command::new(&batch.command.program)
+      .args(&batch.command.arguments)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .kill_on_drop(true)
+      .spawn()
+      .with_context(|| format!("cannot launch batch {} command", batch_index + 1));
+    let child = match child {
+      Ok(child) => child,
+      Err(error) => {
+        cancel_batches(&cancellation, &mut tasks).await;
+        progress.finish_and_clear();
+        return Err(error);
+      }
+    };
+    tasks.spawn(monitor_batch(batch_index, child, cancellation_receiver.clone()));
+  }
+
+  // Poll output counts at a fixed cadence without accumulating delayed ticks under load.
+  let mut poll = time::interval(OUTPUT_POLL_INTERVAL);
+  poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+  // Update progress while batches run, stopping all remaining work on the first failure.
+  while !tasks.is_empty() {
+    tokio::select! {
+      _ = poll.tick() => match count_output_files(output_dir).await {
+        Ok(count) => update_progress(&progress, count, total_representatives),
+        Err(error) => {
+          cancel_batches(&cancellation, &mut tasks).await;
+          progress.finish_and_clear();
+          return Err(error);
+        }
+      },
+      completed = tasks.join_next() => match completed {
+        Some(Ok(Ok(result))) if result.status.is_some_and(|status| !status.success()) => {
+          cancel_batches(&cancellation, &mut tasks).await;
+          progress.finish_and_clear();
+          return Err(batch_exit_error(result));
+        }
+        Some(Ok(Ok(_))) => {}
+        Some(Ok(Err(error))) => {
+          cancel_batches(&cancellation, &mut tasks).await;
+          progress.finish_and_clear();
+          return Err(error);
+        }
+        Some(Err(error)) => {
+          cancel_batches(&cancellation, &mut tasks).await;
+          progress.finish_and_clear();
+          return Err(error).context("batch monitor task failed");
+        }
+        None => break,
+      }
+    }
+  }
+
+  // Perform one final scan so the completed progress display reflects all produced files.
+  match count_output_files(output_dir).await {
+    Ok(count) => {
+      update_progress(&progress, count, total_representatives);
+      progress.finish();
+      Ok(())
+    }
+    Err(error) => {
+      progress.finish_and_clear();
+      Err(error)
+    }
   }
 }
 
@@ -347,6 +599,26 @@ mod tests {
     prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)
   }
 
+  #[cfg(unix)]
+  fn execution_plan(commands: Vec<Vec<OsString>>) -> RunPlan {
+    let batches = commands
+      .into_iter()
+      .enumerate()
+      .map(|(index, arguments)| Batch {
+        input_dir: PathBuf::from(format!("batch-{index}")),
+        files: vec![PathBuf::from(format!("{index}.bin"))],
+        command: PreparedCommand {
+          program: OsString::from("sh"),
+          arguments,
+        },
+      })
+      .collect();
+    RunPlan {
+      batches,
+      redundant: BTreeMap::new(),
+    }
+  }
+
   #[test]
   fn writes_pretty_json_with_a_final_newline() {
     let plan = RunPlan {
@@ -433,8 +705,8 @@ mod tests {
     assert_eq!(input::discover_files(&input_dir).unwrap().len(), 10);
   }
 
-  #[test]
-  fn stages_hardlinks_and_cleans_up_after_success() {
+  #[tokio::test]
+  async fn stages_hardlinks_and_cleans_up_after_success() {
     let root = TestDir::new();
     let input_dir = root.0.join("input");
     let output_dir = root.0.join("output");
@@ -448,7 +720,7 @@ mod tests {
       .iter()
       .map(|batch| batch.input_dir.clone())
       .collect::<Vec<_>>();
-    with_staged_batches(&input_dir, &plan, || {
+    with_staged_batches(&input_dir, &plan, async {
       for batch in &plan.batches {
         assert_eq!(fs::read_dir(&batch.input_dir).unwrap().count(), batch.files.len());
         for file in &batch.files {
@@ -466,14 +738,15 @@ mod tests {
       }
       Ok(())
     })
+    .await
     .unwrap();
     assert!(batch_dirs.iter().all(|directory| !directory.exists()));
     assert!(input_dir.join("a.bin").exists());
     assert!(input_dir.join("b.bin").exists());
   }
 
-  #[test]
-  fn cleans_up_staged_batches_after_operation_failure() {
+  #[tokio::test]
+  async fn cleans_up_staged_batches_after_operation_failure() {
     let root = TestDir::new();
     let input_dir = root.0.join("input");
     let output_dir = root.0.join("output");
@@ -482,18 +755,19 @@ mod tests {
     fs::write(input_dir.join("a.bin"), b"first").unwrap();
     let plan = prepare(&args(input_dir.clone(), output_dir, 1)).unwrap();
     let batch_dir = plan.batches[0].input_dir.clone();
-    let error = with_staged_batches(&input_dir, &plan, || -> anyhow::Result<()> {
+    let error = with_staged_batches(&input_dir, &plan, async {
       assert!(batch_dir.join("a.bin").exists());
-      anyhow::bail!("operation failed")
+      anyhow::bail!("operation failed") as anyhow::Result<()>
     })
+    .await
     .unwrap_err();
     assert!(error.to_string().contains("operation failed"));
     assert!(!batch_dir.exists());
     assert!(input_dir.join("a.bin").exists());
   }
 
-  #[test]
-  fn rolls_back_partial_staging_without_removing_preexisting_paths() {
+  #[tokio::test]
+  async fn rolls_back_partial_staging_without_removing_preexisting_paths() {
     let root = TestDir::new();
     let input_dir = root.0.join("input");
     let output_dir = root.0.join("output");
@@ -506,7 +780,9 @@ mod tests {
     let preexisting_dir = plan.batches[1].input_dir.clone();
     fs::create_dir(&preexisting_dir).unwrap();
     fs::write(preexisting_dir.join("keep"), []).unwrap();
-    let error = with_staged_batches(&input_dir, &plan, || Ok(())).unwrap_err();
+    let error = with_staged_batches(&input_dir, &plan, async { Ok(()) })
+      .await
+      .unwrap_err();
     assert!(error.to_string().contains("cannot create batch directory"));
     assert!(!created_dir.exists());
     assert!(preexisting_dir.join("keep").exists());
@@ -583,5 +859,80 @@ mod tests {
     let plan = prepare(&args(input_dir, output_dir, 8)).unwrap();
     assert_eq!(plan.batches.len(), 3);
     assert!(plan.batches.iter().all(|batch| batch.files.len() == 1));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn executes_all_batches_concurrently_and_discards_success_output() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let scripts = [
+      "touch \"$1/started-0\"; while [ ! -e \"$1/started-1\" ]; do sleep 0.01; done; printf 'batch zero output\\n'; touch \"$1/done-0\"",
+      "touch \"$1/started-1\"; while [ ! -e \"$1/started-0\" ]; do sleep 0.01; done; printf 'batch one error\\n' >&2; touch \"$1/done-1\"",
+    ];
+    let commands = scripts
+      .map(|script| {
+        ["-c", script, "parxec-test", output_dir.to_str().unwrap()]
+          .map(OsString::from)
+          .to_vec()
+      })
+      .to_vec();
+    time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
+      .await
+      .expect("concurrent batches should not deadlock")
+      .unwrap();
+    assert!(output_dir.join("done-0").exists());
+    assert!(output_dir.join("done-1").exists());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn reports_only_the_configured_failure_tail() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let script = "i=1; while [ $i -le 60 ]; do echo line-$i; i=$((i + 1)); done; printf 'stderr-tail\\n' >&2; exit 7";
+    let command = vec![OsString::from("-c"), OsString::from(script)];
+    let error = execute_plan(&execution_plan(vec![command]), &output_dir)
+      .await
+      .unwrap_err()
+      .to_string();
+    assert!(error.contains("exit status: 7"));
+    assert!(error.contains("last 50 lines of stdout/stderr"));
+    assert!(error.contains("line-60"));
+    assert!(error.contains("stderr-tail"));
+    assert!(!error.contains("line-1\n"));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn failure_terminates_a_running_sibling() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let commands = vec![
+      vec![OsString::from("-c"), OsString::from("sleep 0.1; exit 9")],
+      vec![OsString::from("-c"), OsString::from("exec sleep 10")],
+    ];
+    let result =
+      time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
+        .await
+        .expect("failed batch should promptly terminate its sibling");
+    assert!(result.unwrap_err().to_string().contains("exit status: 9"));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn counts_only_top_level_paths_resolving_to_files() {
+    use std::os::unix::fs::symlink;
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(output_dir.join("file.bin"), []).unwrap();
+    fs::create_dir(output_dir.join("nested")).unwrap();
+    fs::write(output_dir.join("nested/ignored.bin"), []).unwrap();
+    symlink("file.bin", output_dir.join("link.bin")).unwrap();
+    assert_eq!(count_output_files(&output_dir).await.unwrap(), 2);
   }
 }

@@ -83,7 +83,7 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-fn run(args: RunArgs) -> anyhow::Result<()> {
+async fn run(args: RunArgs) -> anyhow::Result<()> {
   println!("{args:?}");
   println!();
   let names = input::discover_files(&args.input_dir)?;
@@ -99,17 +99,15 @@ fn run(args: RunArgs) -> anyhow::Result<()> {
   if args.dry_run {
     return run::write_plan(std::io::stdout().lock(), &plan);
   }
-  run::with_staged_batches(&args.input_dir, &plan, || {
-    // TODO: Execute the planned jobs in a Tokio runtime.
-    anyhow::bail!("run is not implemented yet")
-  })
+  run::with_staged_batches(&args.input_dir, &plan, run::execute_plan(&plan, &args.output_dir)).await
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
   match Cli::parse().command {
     Commands::Hash(args) => hash(args),
     Commands::Analyze(args) => analyze(args),
-    Commands::Run(args) => run(args),
+    Commands::Run(args) => run(args).await,
   }
 }
 
