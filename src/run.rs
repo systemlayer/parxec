@@ -32,7 +32,8 @@ const OUTPUT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Layout of the single progress bar displayed during batch execution.
-const PROGRESS_TEMPLATE: &str = "{elapsed_precise} [{wide_bar:.cyan/blue}] {percent:>3}% | {msg} output files | {len} representative files";
+const PROGRESS_TEMPLATE: &str =
+  "{elapsed_precise} [{wide_bar:.cyan/blue}] {percent:>3}% | {msg}/{len}";
 
 /// A program and its arguments, retained as separate operating-system strings.
 #[derive(Debug, PartialEq, Eq, Serialize)]
