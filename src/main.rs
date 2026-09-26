@@ -11,7 +11,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
 use outcome::CommandOutcome;
-use std::{fs, num::NonZeroUsize, time::Instant};
+use std::{fs, time::Instant};
 use tokio::sync::watch;
 
 /// Prints file counts, duplicate percentages, and optional measured hashing time.
@@ -28,9 +28,8 @@ fn print_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>)
   }
 }
 
-/// Prints estimated processing times for all, distinct, and redundant files.
-fn print_processing_times(stats: &stat::Statistics, jobs: NonZeroUsize, file_ms: u64) {
-  println!("Estimated processing at {}ms per file with {} jobs:", file_ms, jobs);
+/// Prints processing times for all, distinct, and redundant files.
+fn print_processing_times(stats: &stat::Statistics) {
   println!("  All files: {:.2}s.", stats.estimated_all_seconds);
   println!("  Distinct files: {:.2}s.", stats.estimated_unique_seconds);
   println!("  Time saved: {:.2}s.", stats.estimated_saved_seconds);
@@ -73,7 +72,8 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
   println!();
 
-  print_processing_times(&stats, args.jobs, args.file_ms);
+  println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
+  print_processing_times(&stats);
   Ok(())
 }
 
@@ -86,7 +86,8 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   print_file_statistics(&stats, None);
   println!();
 
-  print_processing_times(&stats, args.jobs, args.file_ms);
+  println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
+  print_processing_times(&stats);
   Ok(())
 }
 
@@ -103,7 +104,7 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
   let grouping = grouping::group(&hashes);
   println!();
 
-  let stats = stat::calculate(&grouping, args.jobs, 0);
+  let mut stats = stat::calculate(&grouping, args.jobs, 0);
   print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
   println!();
 
@@ -113,18 +114,28 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
     run::write_plan(std::io::stdout().lock(), &plan)?;
     return Ok(CommandOutcome::Completed);
   }
-  println!("Processing {} files.", stats.distinct_hashes);
+  println!("Processing {} files...", stats.distinct_hashes);
   let (cancellation_sender, cancellation) = watch::channel(false);
   ctrlc::set_handler(move || {
     cancellation_sender.send_replace(true);
   })
   .context("cannot install run interruption handler")?;
-  run::with_staged_batches(
+  let start = Instant::now();
+  let outcome = run::with_staged_batches(
     &args.input_dir,
     &plan,
     run::execute_plan(&plan, &args.output_dir, cancellation),
   )
-  .await
+  .await?;
+  println!();
+
+  if outcome == CommandOutcome::Completed {
+    stat::extrapolate_processing_times(&mut stats, start.elapsed().as_secs_f64());
+    println!();
+    println!("Processing times:");
+    print_processing_times(&stats);
+  }
+  Ok(outcome)
 }
 
 #[tokio::main]

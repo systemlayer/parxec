@@ -54,6 +54,20 @@ pub fn calculate(grouping: &Grouping, jobs: NonZeroUsize, file_ms: u64) -> Stati
   }
 }
 
+/// Extrapolates processing times from the measured duration for distinct files.
+pub fn extrapolate_processing_times(stats: &mut Statistics, total_seconds: f64) {
+  if stats.distinct_hashes == 0 {
+    stats.estimated_all_seconds = 0.0;
+    stats.estimated_unique_seconds = 0.0;
+    stats.estimated_saved_seconds = 0.0;
+    return;
+  }
+  let seconds_per_distinct = total_seconds / stats.distinct_hashes as f64;
+  stats.estimated_all_seconds = stats.total_files as f64 * seconds_per_distinct;
+  stats.estimated_unique_seconds = total_seconds;
+  stats.estimated_saved_seconds = stats.redundant_files as f64 * seconds_per_distinct;
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -103,6 +117,33 @@ mod tests {
     assert_eq!(
       (stats.duplicate_groups, stats.redundant_files, stats.estimated_all_seconds),
       (0, 0, 0.0)
+    );
+  }
+
+  #[test]
+  fn extrapolates_from_distinct_file_duration() {
+    let hashes = HashFile::from([
+      ("a".into(), "one".into()),
+      ("b".into(), "one".into()),
+      ("c".into(), "one".into()),
+      ("d".into(), "two".into()),
+    ]);
+    let mut stats = calculate(&grouping::group(&hashes), NonZeroUsize::new(2).unwrap(), 1000);
+    extrapolate_processing_times(&mut stats, 3.0);
+    assert_eq!(
+      (stats.estimated_all_seconds, stats.estimated_unique_seconds, stats.estimated_saved_seconds),
+      (6.0, 3.0, 3.0)
+    );
+  }
+
+  #[test]
+  fn empty_extrapolation_is_finite() {
+    let mut stats =
+      calculate(&grouping::group(&HashFile::new()), NonZeroUsize::new(4).unwrap(), 50);
+    extrapolate_processing_times(&mut stats, 3.0);
+    assert_eq!(
+      (stats.estimated_all_seconds, stats.estimated_unique_seconds, stats.estimated_saved_seconds),
+      (0.0, 0.0, 0.0)
     );
   }
 }
