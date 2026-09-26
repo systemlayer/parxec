@@ -11,7 +11,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
 use outcome::CommandOutcome;
-use std::{fs, time::Instant};
+use std::{fs, num::NonZeroUsize, time::Instant};
 use tokio::sync::watch;
 
 /// Formats file counts, duplicate percentages, and optional measured hashing time.
@@ -31,9 +31,13 @@ fn format_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>
   lines.join("\n")
 }
 
-/// Formats processing times for all, distinct, and redundant files.
-fn format_processing_times(stats: &stat::Statistics) -> String {
+/// Formats concurrent, serial, distinct, and saved processing times.
+fn format_processing_times(stats: &stat::Statistics, jobs: NonZeroUsize) -> String {
   [
+    format!(
+      "  All files (single job, no deduplication): {:.2}s.",
+      stats.estimated_all_seconds * jobs.get() as f64
+    ),
     format!("  All files (without duplicate skipping): {:.2}s.", stats.estimated_all_seconds),
     format!("  Distinct files (actual time): {:.2}s.", stats.estimated_unique_seconds),
     format!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds),
@@ -110,7 +114,7 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   println!();
 
   println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
-  println!("{}", format_processing_times(&stats));
+  println!("{}", format_processing_times(&stats, args.jobs));
   Ok(())
 }
 
@@ -124,7 +128,7 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   println!();
 
   println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
-  println!("{}", format_processing_times(&stats));
+  println!("{}", format_processing_times(&stats, args.jobs));
   Ok(())
 }
 
@@ -178,7 +182,7 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
     stat::extrapolate_processing_times(&mut stats, processing_seconds);
     println!();
     println!("Processing times:");
-    println!("{}", format_processing_times(&stats));
+    println!("{}", format_processing_times(&stats, args.jobs));
   }
   Ok(outcome)
 }
@@ -229,9 +233,14 @@ mod tests {
 
   #[test]
   fn formats_processing_times() {
+    let stats = sample_statistics();
     assert_eq!(
-      format_processing_times(&sample_statistics()),
-      "  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
+      format_processing_times(&stats, NonZeroUsize::new(4).unwrap()),
+      "  All files (single job, no deduplication): 16.00s.\n  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
+    );
+    assert_eq!(
+      format_processing_times(&stats, NonZeroUsize::new(1).unwrap()),
+      "  All files (single job, no deduplication): 4.00s.\n  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
     );
   }
 

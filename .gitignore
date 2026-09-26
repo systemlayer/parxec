@@ -5,6 +5,5 @@ dist/
 **/*.rs.bk
 
 # Other files.
-prototype/
 *.ignore.md
 *.ignore.txt
