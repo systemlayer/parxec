@@ -11,6 +11,7 @@ use anyhow::{Context, bail};
 use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
 use std::{fs, num::NonZeroUsize, time::Instant};
+use tokio::sync::watch;
 
 /// Prints file counts, duplicate percentages, and optional measured hashing time.
 fn print_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>) {
@@ -83,7 +84,7 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn run(args: RunArgs) -> anyhow::Result<()> {
+async fn run(args: RunArgs) -> anyhow::Result<run::ExecutionOutcome> {
   println!("{args:?}");
   println!();
   let names = input::discover_files(&args.input_dir)?;
@@ -97,9 +98,20 @@ async fn run(args: RunArgs) -> anyhow::Result<()> {
   let plan =
     run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)?;
   if args.dry_run {
-    return run::write_plan(std::io::stdout().lock(), &plan);
+    run::write_plan(std::io::stdout().lock(), &plan)?;
+    return Ok(run::ExecutionOutcome::Completed);
   }
-  run::with_staged_batches(&args.input_dir, &plan, run::execute_plan(&plan, &args.output_dir)).await
+  let (cancellation_sender, cancellation) = watch::channel(false);
+  ctrlc::set_handler(move || {
+    cancellation_sender.send_replace(true);
+  })
+  .context("cannot install run interruption handler")?;
+  run::with_staged_batches(
+    &args.input_dir,
+    &plan,
+    run::execute_plan(&plan, &args.output_dir, cancellation),
+  )
+  .await
 }
 
 #[tokio::main]
@@ -107,7 +119,10 @@ async fn main() -> anyhow::Result<()> {
   match Cli::parse().command {
     Commands::Hash(args) => hash(args),
     Commands::Analyze(args) => analyze(args),
-    Commands::Run(args) => run(args).await,
+    Commands::Run(args) => match run(args).await? {
+      run::ExecutionOutcome::Completed => Ok(()),
+      run::ExecutionOutcome::Cancelled => std::process::exit(130),
+    },
   }
 }
 

@@ -65,6 +65,13 @@ pub struct RunPlan {
   pub redundant: BTreeMap<String, String>,
 }
 
+/// Whether batch execution completed normally or was cancelled by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionOutcome {
+  Completed,
+  Cancelled,
+}
+
 /// Completion details from one asynchronously monitored batch process.
 struct BatchResult {
   /// Zero-based position of the batch in the run plan.
@@ -284,7 +291,14 @@ async fn cancel_batches(
 }
 
 /// Executes every planned batch concurrently and reports output-file progress.
-pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<()> {
+pub async fn execute_plan(
+  plan: &RunPlan,
+  output_dir: &Path,
+  mut interrupted: watch::Receiver<bool>,
+) -> anyhow::Result<ExecutionOutcome> {
+  if *interrupted.borrow() {
+    return Ok(ExecutionOutcome::Cancelled);
+  }
   let total_representatives = plan
     .batches
     .iter()
@@ -302,6 +316,11 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
 
   // Launch every batch concurrently, cancelling already-running batches if a later launch fails.
   for (batch_index, batch) in plan.batches.iter().enumerate() {
+    if *interrupted.borrow() {
+      cancel_batches(&cancellation, &mut tasks).await;
+      progress.finish_and_clear();
+      return Ok(ExecutionOutcome::Cancelled);
+    }
     let child = Command::new(&batch.command.program)
       .args(&batch.command.arguments)
       .stdout(Stdio::piped())
@@ -327,6 +346,13 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
   // Update progress while batches run, stopping all remaining work on the first failure.
   while !tasks.is_empty() {
     tokio::select! {
+      biased;
+      changed = interrupted.changed() => {
+        changed.context("run interruption channel closed unexpectedly")?;
+        cancel_batches(&cancellation, &mut tasks).await;
+        progress.finish_and_clear();
+        return Ok(ExecutionOutcome::Cancelled);
+      }
       _ = poll.tick() => match count_output_files(output_dir).await {
         Ok(count) => update_progress(&progress, count, total_representatives),
         Err(error) => {
@@ -362,7 +388,7 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
     Ok(count) => {
       update_progress(&progress, count, total_representatives);
       progress.finish();
-      Ok(())
+      Ok(ExecutionOutcome::Completed)
     }
     Err(error) => {
       progress.finish_and_clear();
@@ -788,6 +814,29 @@ mod tests {
     assert!(preexisting_dir.join("keep").exists());
   }
 
+  #[tokio::test]
+  async fn cancellation_after_staging_rolls_back_batch_directories() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), b"first").unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir.clone(), 1)).unwrap();
+    let batch_dir = plan.batches[0].input_dir.clone();
+    let (interruption_sender, interruption) = watch::channel(false);
+    let outcome = with_staged_batches(&input_dir, &plan, async {
+      assert!(batch_dir.join("a.bin").exists());
+      interruption_sender.send_replace(true);
+      execute_plan(&plan, &output_dir, interruption).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert!(!batch_dir.exists());
+    assert!(input_dir.join("a.bin").exists());
+  }
+
   #[test]
   fn supplied_hashes_are_filtered_and_missing_entries_are_reported() {
     let root = TestDir::new();
@@ -878,10 +927,14 @@ mod tests {
           .to_vec()
       })
       .to_vec();
-    time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
-      .await
-      .expect("concurrent batches should not deadlock")
-      .unwrap();
+    let (_interruption_sender, interruption) = watch::channel(false);
+    time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(commands), &output_dir, interruption),
+    )
+    .await
+    .expect("concurrent batches should not deadlock")
+    .unwrap();
     assert!(output_dir.join("done-0").exists());
     assert!(output_dir.join("done-1").exists());
   }
@@ -894,7 +947,8 @@ mod tests {
     fs::create_dir(&output_dir).unwrap();
     let script = "i=1; while [ $i -le 60 ]; do echo line-$i; i=$((i + 1)); done; printf 'stderr-tail\\n' >&2; exit 7";
     let command = vec![OsString::from("-c"), OsString::from(script)];
-    let error = execute_plan(&execution_plan(vec![command]), &output_dir)
+    let (_interruption_sender, interruption) = watch::channel(false);
+    let error = execute_plan(&execution_plan(vec![command]), &output_dir, interruption)
       .await
       .unwrap_err()
       .to_string();
@@ -915,11 +969,74 @@ mod tests {
       vec![OsString::from("-c"), OsString::from("sleep 0.1; exit 9")],
       vec![OsString::from("-c"), OsString::from("exec sleep 10")],
     ];
-    let result =
-      time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
-        .await
-        .expect("failed batch should promptly terminate its sibling");
+    let (_interruption_sender, interruption) = watch::channel(false);
+    let result = time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(commands), &output_dir, interruption),
+    )
+    .await
+    .expect("failed batch should promptly terminate its sibling");
     assert!(result.unwrap_err().to_string().contains("exit status: 9"));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn latched_interruption_prevents_batch_launch() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let command = vec![
+      OsString::from("-c"),
+      OsString::from("touch \"$1/launched\""),
+      OsString::from("parxec-test"),
+      output_dir.as_os_str().to_owned(),
+    ];
+    let (interruption_sender, interruption) = watch::channel(false);
+    interruption_sender.send_replace(true);
+    let outcome = execute_plan(&execution_plan(vec![command]), &output_dir, interruption)
+      .await
+      .unwrap();
+    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert!(!output_dir.join("launched").exists());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn interruption_terminates_and_reaps_running_child() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let command = vec![
+      OsString::from("-c"),
+      OsString::from("echo $$ > \"$1/pid\"; exec sleep 10"),
+      OsString::from("parxec-test"),
+      output_dir.as_os_str().to_owned(),
+    ];
+    let (interruption_sender, interruption) = watch::channel(false);
+    let pid_path = output_dir.join("pid");
+    let signal_task = tokio::spawn(async move {
+      while !pid_path.exists() {
+        time::sleep(Duration::from_millis(10)).await;
+      }
+      interruption_sender.send_replace(true);
+    });
+    let outcome = time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(vec![command]), &output_dir, interruption),
+    )
+    .await
+    .expect("interruption should promptly terminate the child")
+    .unwrap();
+    signal_task.await.unwrap();
+    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    let pid = fs::read_to_string(output_dir.join("pid")).unwrap();
+    let running = std::process::Command::new("kill")
+      .args(["-0", pid.trim()])
+      .stderr(Stdio::null())
+      .status()
+      .unwrap()
+      .success();
+    assert!(!running);
   }
 
   #[cfg(unix)]
