@@ -14,25 +14,31 @@ use outcome::CommandOutcome;
 use std::{fs, time::Instant};
 use tokio::sync::watch;
 
-/// Prints file counts, duplicate percentages, and optional measured hashing time.
-fn print_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>) {
-  println!("Files: {} total, {} distinct hashes.", stats.total_files, stats.distinct_hashes);
-  println!("Duplicate groups: {}.", stats.duplicate_groups);
-  println!(
-    "Files in duplicate groups: {} ({:.1}%).",
-    stats.duplicate_files, stats.duplicate_percent
-  );
-  println!("Redundant files: {} ({:.1}%).", stats.redundant_files, stats.redundant_percent);
+/// Formats file counts, duplicate percentages, and optional measured hashing time.
+fn format_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>) -> String {
+  let mut lines = vec![
+    format!("Files: {} total, {} distinct hashes.", stats.total_files, stats.distinct_hashes),
+    format!("Duplicate groups: {}.", stats.duplicate_groups),
+    format!(
+      "Files in duplicate groups: {} ({:.1}%).",
+      stats.duplicate_files, stats.duplicate_percent
+    ),
+    format!("Redundant files: {} ({:.1}%).", stats.redundant_files, stats.redundant_percent),
+  ];
   if let Some(seconds) = hashing_seconds {
-    println!("Hashing took {:.2}s.", seconds);
+    lines.push(format!("Hashing took {:.2}s.", seconds));
   }
+  lines.join("\n")
 }
 
-/// Prints processing times for all, distinct, and redundant files.
-fn print_processing_times(stats: &stat::Statistics) {
-  println!("  All files (without duplicate skipping): {:.2}s.", stats.estimated_all_seconds);
-  println!("  Distinct files (actual time): {:.2}s.", stats.estimated_unique_seconds);
-  println!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds);
+/// Formats processing times for all, distinct, and redundant files.
+fn format_processing_times(stats: &stat::Statistics) -> String {
+  [
+    format!("  All files (without duplicate skipping): {:.2}s.", stats.estimated_all_seconds),
+    format!("  Distinct files (actual time): {:.2}s.", stats.estimated_unique_seconds),
+    format!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds),
+  ]
+  .join("\n")
 }
 
 /// Formats run arguments as a labeled, human-readable section.
@@ -100,11 +106,11 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   println!();
 
   let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
-  print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
+  println!("{}", format_file_statistics(&stats, Some(elapsed.as_secs_f64())));
   println!();
 
   println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
-  print_processing_times(&stats);
+  println!("{}", format_processing_times(&stats));
   Ok(())
 }
 
@@ -114,11 +120,11 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   let grouping = grouping::group(&hashes);
 
   let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
-  print_file_statistics(&stats, None);
+  println!("{}", format_file_statistics(&stats, None));
   println!();
 
   println!("Estimated processing at {}ms per file with {} jobs:", args.file_ms, args.jobs);
-  print_processing_times(&stats);
+  println!("{}", format_processing_times(&stats));
   Ok(())
 }
 
@@ -136,7 +142,7 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
   println!();
 
   let mut stats = stat::calculate(&grouping, args.jobs, 0);
-  print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
+  println!("{}", format_file_statistics(&stats, Some(elapsed.as_secs_f64())));
   println!();
 
   let plan =
@@ -164,7 +170,7 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
     stat::extrapolate_processing_times(&mut stats, start.elapsed().as_secs_f64());
     println!();
     println!("Processing times:");
-    print_processing_times(&stats);
+    println!("{}", format_processing_times(&stats));
   }
   Ok(outcome)
 }
@@ -185,6 +191,41 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
   use super::*;
   use crate::cli::{HashAlgorithm, HashOptions};
+
+  /// Returns representative values for testing human-readable statistics.
+  fn sample_statistics() -> stat::Statistics {
+    stat::Statistics {
+      total_files: 8,
+      distinct_hashes: 5,
+      duplicate_groups: 2,
+      duplicate_files: 5,
+      redundant_files: 3,
+      duplicate_percent: 62.5,
+      redundant_percent: 37.5,
+      estimated_all_seconds: 4.0,
+      estimated_unique_seconds: 2.5,
+      estimated_saved_seconds: 1.5,
+    }
+  }
+
+  #[test]
+  fn formats_file_statistics_with_optional_hashing_time() {
+    let stats = sample_statistics();
+    let counts = "Files: 8 total, 5 distinct hashes.\nDuplicate groups: 2.\nFiles in duplicate groups: 5 (62.5%).\nRedundant files: 3 (37.5%).";
+    assert_eq!(format_file_statistics(&stats, None), counts);
+    assert_eq!(
+      format_file_statistics(&stats, Some(1.234)),
+      format!("{counts}\nHashing took 1.23s.")
+    );
+  }
+
+  #[test]
+  fn formats_processing_times() {
+    assert_eq!(
+      format_processing_times(&sample_statistics()),
+      "  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
+    );
+  }
 
   #[test]
   fn formats_run_arguments_for_people() {
