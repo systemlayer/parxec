@@ -164,10 +164,15 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
     run::execute_plan(&plan, &args.output_dir, cancellation),
   )
   .await?;
+  let processing_seconds = start.elapsed().as_secs_f64();
   println!();
 
   if outcome == CommandOutcome::Completed {
-    stat::extrapolate_processing_times(&mut stats, start.elapsed().as_secs_f64());
+    if !plan.redundant.is_empty() {
+      println!("Hard linking {} redundant files.", plan.redundant.len());
+      run::link_redundant_outputs(&args.output_dir, &plan.redundant)?;
+    }
+    stat::extrapolate_processing_times(&mut stats, processing_seconds);
     println!();
     println!("Processing times:");
     println!("{}", format_processing_times(&stats));

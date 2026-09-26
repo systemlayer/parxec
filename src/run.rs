@@ -452,6 +452,25 @@ fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
+/// Creates duplicate output names as hard links to their representative outputs.
+pub fn link_redundant_outputs(
+  output_dir: &Path,
+  redundant: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+  for (duplicate, representative) in redundant {
+    let source = output_dir.join(representative);
+    let destination = output_dir.join(duplicate);
+    fs::hard_link(&source, &destination).with_context(|| {
+      format!(
+        "cannot hardlink representative output {} to duplicate output {}",
+        source.display(),
+        destination.display()
+      )
+    })?;
+  }
+  Ok(())
+}
+
 /// Loads supplied hashes or computes hashes for all selected input files.
 pub fn resolve_hashes(args: &RunArgs, names: &[PathBuf]) -> anyhow::Result<hash_file::HashFile> {
   if let Some(path) = &args.hash_input {
@@ -887,6 +906,73 @@ mod tests {
     fs::write(output_dir.join("old.bin"), []).unwrap();
     let error = prepare(&args(input_dir, output_dir, 1)).unwrap_err();
     assert!(error.to_string().contains("is not empty"));
+  }
+
+  #[test]
+  fn links_redundant_outputs_and_preserves_exact_file_inventory() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    for (name, contents) in [
+      ("a.bin", b"same".as_slice()),
+      ("b.bin", b"same"),
+      ("c.bin", b"other"),
+      ("d.bin", b"same"),
+    ] {
+      fs::write(input_dir.join(name), contents).unwrap();
+    }
+    fs::write(output_dir.join("a.bin"), b"processed same").unwrap();
+    fs::write(output_dir.join("c.bin"), b"processed other").unwrap();
+    let redundant = BTreeMap::from([
+      ("b.bin".into(), "a.bin".into()),
+      ("d.bin".into(), "a.bin".into()),
+    ]);
+    link_redundant_outputs(&output_dir, &redundant).unwrap();
+    let names = |directory: &Path| {
+      let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+      names.sort();
+      names
+    };
+    assert_eq!(names(&input_dir), names(&output_dir));
+    fs::write(output_dir.join("a.bin"), b"updated").unwrap();
+    assert_eq!(fs::read(output_dir.join("b.bin")).unwrap(), b"updated");
+    assert_eq!(fs::read(output_dir.join("d.bin")).unwrap(), b"updated");
+  }
+
+  #[test]
+  fn linking_no_redundant_outputs_is_a_noop() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    link_redundant_outputs(&output_dir, &BTreeMap::new()).unwrap();
+    assert_eq!(fs::read_dir(output_dir).unwrap().count(), 0);
+  }
+
+  #[test]
+  fn redundant_output_link_errors_include_both_paths() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let source = output_dir.join("representative.bin");
+    let destination = output_dir.join("duplicate.bin");
+    let redundant = BTreeMap::from([("duplicate.bin".into(), "representative.bin".into())]);
+    let missing_error = link_redundant_outputs(&output_dir, &redundant)
+      .unwrap_err()
+      .to_string();
+    assert!(missing_error.contains(&source.display().to_string()));
+    assert!(missing_error.contains(&destination.display().to_string()));
+    fs::write(&source, b"source").unwrap();
+    fs::write(&destination, b"occupied").unwrap();
+    let occupied_error = link_redundant_outputs(&output_dir, &redundant)
+      .unwrap_err()
+      .to_string();
+    assert!(occupied_error.contains(&source.display().to_string()));
+    assert!(occupied_error.contains(&destination.display().to_string()));
   }
 
   #[test]
