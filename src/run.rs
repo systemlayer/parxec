@@ -18,7 +18,7 @@ use tokio::{
   io::{AsyncBufReadExt, AsyncRead, BufReader},
   process::{Child, Command},
   sync::{Mutex, watch},
-  task::{JoinHandle, JoinSet},
+  task::{self, JoinHandle, JoinSet},
   time::{self, MissedTickBehavior},
 };
 
@@ -227,28 +227,36 @@ async fn monitor_batch(
   })
 }
 
-/// Counts top-level paths resolving to regular files without changing the directory.
+/// Counts top-level regular files without changing the directory.
 async fn count_output_files(output_dir: &Path) -> anyhow::Result<u64> {
-  let mut entries = tokio::fs::read_dir(output_dir)
-    .await
-    .with_context(|| format!("cannot read output directory {}", output_dir.display()))?;
-  let mut count = 0;
-  while let Some(entry) = entries
-    .next_entry()
-    .await
-    .with_context(|| format!("cannot read entry in output directory {}", output_dir.display()))?
-  {
-    match tokio::fs::metadata(entry.path()).await {
-      Ok(metadata) if metadata.is_file() => count += 1,
-      Ok(_) => {}
-      Err(error) if error.kind() == ErrorKind::NotFound => {}
-      Err(error) => {
-        return Err(error)
-          .context(format!("cannot inspect output path {}", entry.path().display()));
+  // Own the path so the blocking task does not borrow from its async caller.
+  let output_dir = output_dir.to_owned();
+  // Keep the complete blocking filesystem traversal off the async runtime threads.
+  task::spawn_blocking(move || {
+    // Open the directory once and retain its path for contextual errors.
+    let entries = fs::read_dir(&output_dir)
+      .with_context(|| format!("cannot read output directory {}", output_dir.display()))?;
+    let mut count = 0;
+    // Use directory-entry types to avoid a separate metadata lookup for every path.
+    for entry in entries {
+      let entry = entry.with_context(|| {
+        format!("cannot read entry in output directory {}", output_dir.display())
+      })?;
+      match entry.file_type() {
+        Ok(file_type) if file_type.is_file() => count += 1,
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+          return Err(error)
+            .context(format!("cannot inspect output path {}", entry.path().display()));
+        }
       }
     }
-  }
-  Ok(count)
+    Ok(count)
+  })
+  // Distinguish blocking-task failures from errors returned by the directory scan.
+  .await
+  .context("output directory scan task failed")?
 }
 
 /// Updates both the bounded bar position and the uncapped observed file count.
@@ -1117,7 +1125,7 @@ mod tests {
 
   #[cfg(unix)]
   #[tokio::test]
-  async fn counts_only_top_level_paths_resolving_to_files() {
+  async fn counts_only_top_level_regular_files() {
     use std::os::unix::fs::symlink;
     let root = TestDir::new();
     let output_dir = root.0.join("output");
@@ -1126,6 +1134,6 @@ mod tests {
     fs::create_dir(output_dir.join("nested")).unwrap();
     fs::write(output_dir.join("nested/ignored.bin"), []).unwrap();
     symlink("file.bin", output_dir.join("link.bin")).unwrap();
-    assert_eq!(count_output_files(&output_dir).await.unwrap(), 2);
+    assert_eq!(count_output_files(&output_dir).await.unwrap(), 1);
   }
 }
