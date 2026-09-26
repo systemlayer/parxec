@@ -441,7 +441,7 @@ fn substitute(template: &OsStr, input: &OsStr, output: &OsStr) -> anyhow::Result
 }
 
 /// Ensures the requested output directory exists and contains no entries.
-fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
+pub fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
   let mut entries = fs::read_dir(path)
     .with_context(|| format!("cannot read output directory {}", path.display()))?;
   let first = entries
@@ -552,7 +552,7 @@ fn prepare_batches(
   Ok(batches)
 }
 
-/// Validates the output and prepares directory-batched work from grouped files.
+/// Prepares directory-batched work from grouped files.
 pub fn prepare_plan(
   input_dir: &Path,
   output_dir: &Path,
@@ -560,7 +560,6 @@ pub fn prepare_plan(
   command_elements: &[OsString],
   grouping: grouping::Grouping,
 ) -> anyhow::Result<RunPlan> {
-  validate_output_dir(output_dir)?;
   let mut representatives = grouping
     .groups
     .values()
@@ -891,20 +890,17 @@ mod tests {
   #[test]
   fn output_directory_must_exist_and_be_empty() {
     let root = TestDir::new();
-    let input_dir = root.0.join("input");
-    fs::create_dir(&input_dir).unwrap();
-    fs::write(input_dir.join("a.bin"), []).unwrap();
     let missing = root.0.join("missing");
-    let error = prepare(&args(input_dir.clone(), missing, 1)).unwrap_err();
+    let error = validate_output_dir(&missing).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_file = root.0.join("file");
     fs::write(&output_file, []).unwrap();
-    let error = prepare(&args(input_dir.clone(), output_file, 1)).unwrap_err();
+    let error = validate_output_dir(&output_file).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_dir = root.0.join("output");
     fs::create_dir(&output_dir).unwrap();
     fs::write(output_dir.join("old.bin"), []).unwrap();
-    let error = prepare(&args(input_dir, output_dir, 1)).unwrap_err();
+    let error = validate_output_dir(&output_dir).unwrap_err();
     assert!(error.to_string().contains("is not empty"));
   }
 

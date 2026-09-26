@@ -132,6 +132,7 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
   println!("{}", format_run_args(&args));
   println!();
 
+  run::validate_output_dir(&args.output_dir)?;
   let names = input::discover_files(&args.input_dir)?;
 
   println!("Hashing {} files.", names.len());
@@ -151,6 +152,8 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
     run::write_plan(std::io::stdout().lock(), &plan)?;
     return Ok(CommandOutcome::Completed);
   }
+
+  run::validate_output_dir(&args.output_dir)?;
   println!("Processing {} files...", stats.distinct_hashes);
   let (cancellation_sender, cancellation) = watch::channel(false);
   ctrlc::set_handler(move || {
