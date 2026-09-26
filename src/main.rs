@@ -38,12 +38,12 @@ fn format_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>
 fn format_processing_times(stats: &stat::Statistics, jobs: NonZeroUsize) -> String {
   [
     format!(
-      "  All files (single job, no deduplication): {:.2}s.",
+      "  All files (single job, no deduplication): {:.2}s",
       stats.estimated_all_seconds * jobs.get() as f64
     ),
-    format!("  All files (without duplicate skipping): {:.2}s.", stats.estimated_all_seconds),
-    format!("  Distinct files (actual time): {:.2}s.", stats.estimated_unique_seconds),
-    format!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds),
+    format!("  All files (without duplicate skipping): {:.2}s", stats.estimated_all_seconds),
+    format!("  Distinct files (actual time): {:.2}s", stats.estimated_unique_seconds),
+    format!("  Time saved (by skipping duplicates): {:.2}s", stats.estimated_saved_seconds),
   ]
   .join("\n")
 }
@@ -66,15 +66,15 @@ fn format_run_args(args: &RunArgs) -> String {
     .join(" ");
   [
     "Arguments:".to_owned(),
-    format!("  Input directory: {}.", args.input_dir.display()),
-    format!("  Output directory: {}.", args.output_dir.display()),
-    format!("  Hash input: {hash_input}."),
-    format!("  Hash algorithm: {}.", args.hashing.hash_algorithm),
-    format!("  Hash threads: {hash_threads}."),
-    format!("  Tile size: {}px.", args.hashing.tile_size),
-    format!("  Jobs: {}.", args.jobs),
-    format!("  Dry run: {}.", if args.dry_run { "yes" } else { "no" }),
-    format!("  Command: {command}."),
+    format!("  Input directory: {}", args.input_dir.display()),
+    format!("  Output directory: {}", args.output_dir.display()),
+    format!("  Hash input: {hash_input}"),
+    format!("  Hash algorithm: {}", args.hashing.hash_algorithm),
+    format!("  Hash threads: {hash_threads}"),
+    format!("  Tile size: {}px", args.hashing.tile_size),
+    format!("  Jobs: {}", args.jobs),
+    format!("  Dry run: {}", if args.dry_run { "yes" } else { "no" }),
+    format!("  Command: {command}"),
   ]
   .join("\n")
 }
@@ -248,11 +248,11 @@ mod tests {
     let stats = sample_statistics();
     assert_eq!(
       format_processing_times(&stats, NonZeroUsize::new(4).unwrap()),
-      "  All files (single job, no deduplication): 16.00s.\n  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
+      "  All files (single job, no deduplication): 16.00s\n  All files (without duplicate skipping): 4.00s\n  Distinct files (actual time): 2.50s\n  Time saved (by skipping duplicates): 1.50s"
     );
     assert_eq!(
       format_processing_times(&stats, NonZeroUsize::new(1).unwrap()),
-      "  All files (single job, no deduplication): 4.00s.\n  All files (without duplicate skipping): 4.00s.\n  Distinct files (actual time): 2.50s.\n  Time saved (by skipping duplicates): 1.50s."
+      "  All files (single job, no deduplication): 4.00s\n  All files (without duplicate skipping): 4.00s\n  Distinct files (actual time): 2.50s\n  Time saved (by skipping duplicates): 1.50s"
     );
   }
 
@@ -276,12 +276,12 @@ mod tests {
     };
     assert_eq!(
       format_run_args(&args),
-      "Arguments:\n  Input directory: input files.\n  Output directory: output.\n  Hash input: hashes.json.\n  Hash algorithm: SHA-256.\n  Hash threads: 2.\n  Tile size: 16px.\n  Jobs: 4.\n  Dry run: yes.\n  Command: processor two words."
+      "Arguments:\n  Input directory: input files\n  Output directory: output\n  Hash input: hashes.json\n  Hash algorithm: SHA-256\n  Hash threads: 2\n  Tile size: 16px\n  Jobs: 4\n  Dry run: yes\n  Command: processor two words"
     );
     args.hash_input = None;
     args.hashing.hash_threads = 0;
     assert!(format_run_args(&args).contains(
-      "  Hash input: not provided.\n  Hash algorithm: SHA-256.\n  Hash threads: automatic."
+      "  Hash input: not provided\n  Hash algorithm: SHA-256\n  Hash threads: automatic"
     ));
   }
 
