@@ -1,0 +1,103 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Give the automatic token read-only access unless a job explicitly requires more.
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Pin the runner to Ubuntu 24.04 because newer images may break compatibility with Debian.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idruns-on
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Pass the generated tag to the release job without granting this job write access.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idoutputs
+    outputs:
+      tag_name: ${{ steps.tag_step.outputs.tag_name }}
+    steps:
+
+    # Check out the source without persisting the token in the local Git configuration.
+    # https://github.com/actions/checkout#usage
+    - name: Check Out Source
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Build
+      run: |-
+        mkdir -p dist
+        docker build -f build.dockerfile . -t parxec-image
+        docker run --rm parxec-image cat /builder/target/release/parxec > dist/parxec
+        chmod +x dist/parxec
+        tar czf dist/parxec.tgz -C dist parxec
+
+    # Derive a timestamped tag, validate it, and expose it as a step output for later jobs.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-output-parameter
+    - name: Generate Tag
+      id: tag_step
+      run: |-
+        program_version=$(./dist/parxec -V | awk '{print $2}')
+        if [[ ! "$program_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+          printf 'Invalid program version: %s.\n' "$program_version" >&2
+          exit 1
+        fi
+        tag_name="${program_version}-$(date +%y%m%d%H%M)"
+        mv dist/parxec.tgz "dist/parxec-${tag_name}.tgz"
+        (cd dist && sha256sum "parxec-${tag_name}.tgz" > "parxec-${tag_name}.sha256")
+        printf 'tag_name=%s\n' "$tag_name" >> "$GITHUB_OUTPUT"
+
+    # Persist release files so the isolated release job can download them safely.
+    # https://docs.github.com/en/actions/tutorials/store-and-share-data
+    - name: Upload Release Assets
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: release-assets
+        compression-level: 0
+        retention-days: 1
+        path: |-
+          dist/parxec-${{ steps.tag_step.outputs.tag_name }}.tgz
+          dist/parxec-${{ steps.tag_step.outputs.tag_name }}.sha256
+        if-no-files-found: error
+
+  release:
+    # Grant repository write access only after the read-only build job succeeds.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idpermissions
+    permissions:
+      contents: write
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+
+    # Restore the exact files produced by the build job onto this job's fresh runner.
+    # https://docs.github.com/en/actions/tutorials/store-and-share-data#downloading-artifacts-during-a-workflow-run
+    - name: Download Release Assets
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: release-assets
+        path: dist
+
+    - name: Verify Release Assets
+      env:
+        TAG_NAME: ${{ needs.build.outputs.tag_name }}
+      working-directory: dist
+      run: sha256sum --check "parxec-${TAG_NAME}.sha256"
+
+    # Create the tag and release at the triggering commit, then attach both release files.
+    # https://cli.github.com/manual/gh_release_create
+    - name: Create GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG_NAME: ${{ needs.build.outputs.tag_name }}
+      run: >-
+        gh release create "$TAG_NAME" dist/*
+        --target "$GITHUB_SHA"
+        --generate-notes
