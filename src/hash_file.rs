@@ -11,7 +11,6 @@ use std::{
 pub type HashFile = BTreeMap<String, String>;
 
 /// Reads a hash file from JSON.
-#[allow(dead_code)]
 pub fn read(path: &Path) -> anyhow::Result<HashFile> {
   let file =
     File::open(path).with_context(|| format!("cannot open hash file {}", path.display()))?;

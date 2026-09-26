@@ -1,4 +1,4 @@
-use crate::{cli::RunArgs, grouping, hash_file, hasher};
+use crate::{cli::RunArgs, grouping, hash_file, hasher, outcome::CommandOutcome};
 use anyhow::{Context, bail, ensure};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Serialize, Serializer, ser::Error};
@@ -32,7 +32,8 @@ const OUTPUT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PROGRESS_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Layout of the single progress bar displayed during batch execution.
-const PROGRESS_TEMPLATE: &str = "{elapsed_precise} [{wide_bar:.cyan/blue}] {percent:>3}% | {msg} output files | {len} representative files";
+const PROGRESS_TEMPLATE: &str =
+  "{elapsed_precise} [{wide_bar:.cyan/blue}] {percent:>3}% | {msg}/{len}";
 
 /// A program and its arguments, retained as separate operating-system strings.
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -284,7 +285,14 @@ async fn cancel_batches(
 }
 
 /// Executes every planned batch concurrently and reports output-file progress.
-pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<()> {
+pub async fn execute_plan(
+  plan: &RunPlan,
+  output_dir: &Path,
+  mut interrupted: watch::Receiver<bool>,
+) -> anyhow::Result<CommandOutcome> {
+  if *interrupted.borrow() {
+    return Ok(CommandOutcome::Cancelled);
+  }
   let total_representatives = plan
     .batches
     .iter()
@@ -302,6 +310,11 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
 
   // Launch every batch concurrently, cancelling already-running batches if a later launch fails.
   for (batch_index, batch) in plan.batches.iter().enumerate() {
+    if *interrupted.borrow() {
+      cancel_batches(&cancellation, &mut tasks).await;
+      progress.finish_and_clear();
+      return Ok(CommandOutcome::Cancelled);
+    }
     let child = Command::new(&batch.command.program)
       .args(&batch.command.arguments)
       .stdout(Stdio::piped())
@@ -327,6 +340,13 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
   // Update progress while batches run, stopping all remaining work on the first failure.
   while !tasks.is_empty() {
     tokio::select! {
+      biased;
+      changed = interrupted.changed() => {
+        changed.context("run interruption channel closed unexpectedly")?;
+        cancel_batches(&cancellation, &mut tasks).await;
+        progress.finish_and_clear();
+        return Ok(CommandOutcome::Cancelled);
+      }
       _ = poll.tick() => match count_output_files(output_dir).await {
         Ok(count) => update_progress(&progress, count, total_representatives),
         Err(error) => {
@@ -362,7 +382,7 @@ pub async fn execute_plan(plan: &RunPlan, output_dir: &Path) -> anyhow::Result<(
     Ok(count) => {
       update_progress(&progress, count, total_representatives);
       progress.finish();
-      Ok(())
+      Ok(CommandOutcome::Completed)
     }
     Err(error) => {
       progress.finish_and_clear();
@@ -421,7 +441,7 @@ fn substitute(template: &OsStr, input: &OsStr, output: &OsStr) -> anyhow::Result
 }
 
 /// Ensures the requested output directory exists and contains no entries.
-fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
+pub fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
   let mut entries = fs::read_dir(path)
     .with_context(|| format!("cannot read output directory {}", path.display()))?;
   let first = entries
@@ -429,6 +449,25 @@ fn validate_output_dir(path: &Path) -> anyhow::Result<()> {
     .transpose()
     .with_context(|| format!("cannot read entry in output directory {}", path.display()))?;
   ensure!(first.is_none(), "output directory {} is not empty", path.display());
+  Ok(())
+}
+
+/// Creates duplicate output names as hard links to their representative outputs.
+pub fn link_redundant_outputs(
+  output_dir: &Path,
+  redundant: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+  for (duplicate, representative) in redundant {
+    let source = output_dir.join(representative);
+    let destination = output_dir.join(duplicate);
+    fs::hard_link(&source, &destination).with_context(|| {
+      format!(
+        "cannot hardlink representative output {} to duplicate output {}",
+        source.display(),
+        destination.display()
+      )
+    })?;
+  }
   Ok(())
 }
 
@@ -513,7 +552,7 @@ fn prepare_batches(
   Ok(batches)
 }
 
-/// Validates the output and prepares directory-batched work from grouped files.
+/// Prepares directory-batched work from grouped files.
 pub fn prepare_plan(
   input_dir: &Path,
   output_dir: &Path,
@@ -521,7 +560,6 @@ pub fn prepare_plan(
   command_elements: &[OsString],
   grouping: grouping::Grouping,
 ) -> anyhow::Result<RunPlan> {
-  validate_output_dir(output_dir)?;
   let mut representatives = grouping
     .groups
     .values()
@@ -788,6 +826,29 @@ mod tests {
     assert!(preexisting_dir.join("keep").exists());
   }
 
+  #[tokio::test]
+  async fn cancellation_after_staging_rolls_back_batch_directories() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), b"first").unwrap();
+    let plan = prepare(&args(input_dir.clone(), output_dir.clone(), 1)).unwrap();
+    let batch_dir = plan.batches[0].input_dir.clone();
+    let (interruption_sender, interruption) = watch::channel(false);
+    let outcome = with_staged_batches(&input_dir, &plan, async {
+      assert!(batch_dir.join("a.bin").exists());
+      interruption_sender.send_replace(true);
+      execute_plan(&plan, &output_dir, interruption).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome, CommandOutcome::Cancelled);
+    assert!(!batch_dir.exists());
+    assert!(input_dir.join("a.bin").exists());
+  }
+
   #[test]
   fn supplied_hashes_are_filtered_and_missing_entries_are_reported() {
     let root = TestDir::new();
@@ -829,21 +890,85 @@ mod tests {
   #[test]
   fn output_directory_must_exist_and_be_empty() {
     let root = TestDir::new();
-    let input_dir = root.0.join("input");
-    fs::create_dir(&input_dir).unwrap();
-    fs::write(input_dir.join("a.bin"), []).unwrap();
     let missing = root.0.join("missing");
-    let error = prepare(&args(input_dir.clone(), missing, 1)).unwrap_err();
+    let error = validate_output_dir(&missing).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_file = root.0.join("file");
     fs::write(&output_file, []).unwrap();
-    let error = prepare(&args(input_dir.clone(), output_file, 1)).unwrap_err();
+    let error = validate_output_dir(&output_file).unwrap_err();
     assert!(error.to_string().contains("cannot read output directory"));
     let output_dir = root.0.join("output");
     fs::create_dir(&output_dir).unwrap();
     fs::write(output_dir.join("old.bin"), []).unwrap();
-    let error = prepare(&args(input_dir, output_dir, 1)).unwrap_err();
+    let error = validate_output_dir(&output_dir).unwrap_err();
     assert!(error.to_string().contains("is not empty"));
+  }
+
+  #[test]
+  fn links_redundant_outputs_and_preserves_exact_file_inventory() {
+    let root = TestDir::new();
+    let input_dir = root.0.join("input");
+    let output_dir = root.0.join("output");
+    fs::create_dir(&input_dir).unwrap();
+    fs::create_dir(&output_dir).unwrap();
+    for (name, contents) in [
+      ("a.bin", b"same".as_slice()),
+      ("b.bin", b"same"),
+      ("c.bin", b"other"),
+      ("d.bin", b"same"),
+    ] {
+      fs::write(input_dir.join(name), contents).unwrap();
+    }
+    fs::write(output_dir.join("a.bin"), b"processed same").unwrap();
+    fs::write(output_dir.join("c.bin"), b"processed other").unwrap();
+    let redundant = BTreeMap::from([
+      ("b.bin".into(), "a.bin".into()),
+      ("d.bin".into(), "a.bin".into()),
+    ]);
+    link_redundant_outputs(&output_dir, &redundant).unwrap();
+    let names = |directory: &Path| {
+      let mut names = fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+      names.sort();
+      names
+    };
+    assert_eq!(names(&input_dir), names(&output_dir));
+    fs::write(output_dir.join("a.bin"), b"updated").unwrap();
+    assert_eq!(fs::read(output_dir.join("b.bin")).unwrap(), b"updated");
+    assert_eq!(fs::read(output_dir.join("d.bin")).unwrap(), b"updated");
+  }
+
+  #[test]
+  fn linking_no_redundant_outputs_is_a_noop() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    link_redundant_outputs(&output_dir, &BTreeMap::new()).unwrap();
+    assert_eq!(fs::read_dir(output_dir).unwrap().count(), 0);
+  }
+
+  #[test]
+  fn redundant_output_link_errors_include_both_paths() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let source = output_dir.join("representative.bin");
+    let destination = output_dir.join("duplicate.bin");
+    let redundant = BTreeMap::from([("duplicate.bin".into(), "representative.bin".into())]);
+    let missing_error = link_redundant_outputs(&output_dir, &redundant)
+      .unwrap_err()
+      .to_string();
+    assert!(missing_error.contains(&source.display().to_string()));
+    assert!(missing_error.contains(&destination.display().to_string()));
+    fs::write(&source, b"source").unwrap();
+    fs::write(&destination, b"occupied").unwrap();
+    let occupied_error = link_redundant_outputs(&output_dir, &redundant)
+      .unwrap_err()
+      .to_string();
+    assert!(occupied_error.contains(&source.display().to_string()));
+    assert!(occupied_error.contains(&destination.display().to_string()));
   }
 
   #[test]
@@ -878,10 +1003,14 @@ mod tests {
           .to_vec()
       })
       .to_vec();
-    time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
-      .await
-      .expect("concurrent batches should not deadlock")
-      .unwrap();
+    let (_interruption_sender, interruption) = watch::channel(false);
+    time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(commands), &output_dir, interruption),
+    )
+    .await
+    .expect("concurrent batches should not deadlock")
+    .unwrap();
     assert!(output_dir.join("done-0").exists());
     assert!(output_dir.join("done-1").exists());
   }
@@ -894,7 +1023,8 @@ mod tests {
     fs::create_dir(&output_dir).unwrap();
     let script = "i=1; while [ $i -le 60 ]; do echo line-$i; i=$((i + 1)); done; printf 'stderr-tail\\n' >&2; exit 7";
     let command = vec![OsString::from("-c"), OsString::from(script)];
-    let error = execute_plan(&execution_plan(vec![command]), &output_dir)
+    let (_interruption_sender, interruption) = watch::channel(false);
+    let error = execute_plan(&execution_plan(vec![command]), &output_dir, interruption)
       .await
       .unwrap_err()
       .to_string();
@@ -915,11 +1045,74 @@ mod tests {
       vec![OsString::from("-c"), OsString::from("sleep 0.1; exit 9")],
       vec![OsString::from("-c"), OsString::from("exec sleep 10")],
     ];
-    let result =
-      time::timeout(Duration::from_secs(2), execute_plan(&execution_plan(commands), &output_dir))
-        .await
-        .expect("failed batch should promptly terminate its sibling");
+    let (_interruption_sender, interruption) = watch::channel(false);
+    let result = time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(commands), &output_dir, interruption),
+    )
+    .await
+    .expect("failed batch should promptly terminate its sibling");
     assert!(result.unwrap_err().to_string().contains("exit status: 9"));
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn latched_interruption_prevents_batch_launch() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let command = vec![
+      OsString::from("-c"),
+      OsString::from("touch \"$1/launched\""),
+      OsString::from("parxec-test"),
+      output_dir.as_os_str().to_owned(),
+    ];
+    let (interruption_sender, interruption) = watch::channel(false);
+    interruption_sender.send_replace(true);
+    let outcome = execute_plan(&execution_plan(vec![command]), &output_dir, interruption)
+      .await
+      .unwrap();
+    assert_eq!(outcome, CommandOutcome::Cancelled);
+    assert!(!output_dir.join("launched").exists());
+  }
+
+  #[cfg(unix)]
+  #[tokio::test]
+  async fn interruption_terminates_and_reaps_running_child() {
+    let root = TestDir::new();
+    let output_dir = root.0.join("output");
+    fs::create_dir(&output_dir).unwrap();
+    let command = vec![
+      OsString::from("-c"),
+      OsString::from("echo $$ > \"$1/pid\"; exec sleep 10"),
+      OsString::from("parxec-test"),
+      output_dir.as_os_str().to_owned(),
+    ];
+    let (interruption_sender, interruption) = watch::channel(false);
+    let pid_path = output_dir.join("pid");
+    let signal_task = tokio::spawn(async move {
+      while !pid_path.exists() {
+        time::sleep(Duration::from_millis(10)).await;
+      }
+      interruption_sender.send_replace(true);
+    });
+    let outcome = time::timeout(
+      Duration::from_secs(2),
+      execute_plan(&execution_plan(vec![command]), &output_dir, interruption),
+    )
+    .await
+    .expect("interruption should promptly terminate the child")
+    .unwrap();
+    signal_task.await.unwrap();
+    assert_eq!(outcome, CommandOutcome::Cancelled);
+    let pid = fs::read_to_string(output_dir.join("pid")).unwrap();
+    let running = std::process::Command::new("kill")
+      .args(["-0", pid.trim()])
+      .stderr(Stdio::null())
+      .status()
+      .unwrap()
+      .success();
+    assert!(!running);
   }
 
   #[cfg(unix)]
