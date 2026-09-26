@@ -99,6 +99,5 @@ jobs:
         GH_REPO: ${{ github.repository }}
         TAG_NAME: ${{ needs.build.outputs.tag_name }}
       run: >-
-        gh release create "$TAG_NAME" dist/*
+        gh release create "$TAG_NAME" "dist/parxec-${TAG_NAME}"
         --target "$GITHUB_SHA"
-        --generate-notes
