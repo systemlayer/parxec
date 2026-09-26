@@ -91,7 +91,7 @@ jobs:
       working-directory: dist
       run: sha256sum --check "parxec-${TAG_NAME}.sha256"
 
-    # Create the tag and release at the triggering commit, then attach both release files.
+    # Create the tag and release at the triggering commit, then attach the binary archive.
     # https://cli.github.com/manual/gh_release_create
     - name: Create GitHub Release
       env:
@@ -99,5 +99,5 @@ jobs:
         GH_REPO: ${{ github.repository }}
         TAG_NAME: ${{ needs.build.outputs.tag_name }}
       run: >-
-        gh release create "$TAG_NAME" "dist/parxec-${TAG_NAME}"
+        gh release create "$TAG_NAME" "dist/parxec-${TAG_NAME}.tgz"
         --target "$GITHUB_SHA"
