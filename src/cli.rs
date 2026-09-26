@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use std::{ffi::OsString, num::NonZeroUsize, path::PathBuf};
+use std::{ffi::OsString, fmt, num::NonZeroUsize, path::PathBuf};
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(about = "Process file collections and run commands in parallel")]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 pub struct Cli {
@@ -9,7 +9,7 @@ pub struct Cli {
   pub command: Commands,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Subcommand)]
 pub enum Commands {
   /// Compute file hashes and save them as JSON.
   Hash(HashArgs),
@@ -25,7 +25,17 @@ pub enum HashAlgorithm {
   Downsampled,
 }
 
-#[derive(Debug, Args)]
+/// Formats a hashing algorithm for user-facing output.
+impl fmt::Display for HashAlgorithm {
+  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    formatter.write_str(match self {
+      Self::Sha256 => "SHA-256",
+      Self::Downsampled => "Downsampled",
+    })
+  }
+}
+
+#[derive(Args)]
 pub struct HashOptions {
   /// Algorithm used to hash files; downsampled hashing requires images.
   #[arg(short = 'a', long, value_enum, default_value_t = HashAlgorithm::Downsampled)]
@@ -38,7 +48,7 @@ pub struct HashOptions {
   pub tile_size: NonZeroUsize,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct HashArgs {
   /// Directory containing files to hash.
   pub input_dir: PathBuf,
@@ -58,7 +68,7 @@ pub struct HashArgs {
   pub file_ms: u64,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct AnalyzeArgs {
   /// JSON file containing previously computed hashes.
   #[arg(short = 'f', long, required = true)]
@@ -71,7 +81,7 @@ pub struct AnalyzeArgs {
   pub file_ms: u64,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 pub struct RunArgs {
   /// Directory containing files to process.
   pub input_dir: PathBuf,
@@ -108,7 +118,10 @@ mod tests {
       vec!["parxec", "help", "analyze"],
       vec!["parxec", "help", "run"],
     ] {
-      assert_eq!(Cli::try_parse_from(args).unwrap_err().kind(), ErrorKind::DisplayHelp);
+      let error = Cli::try_parse_from(args)
+        .err()
+        .expect("help arguments should produce a display error");
+      assert_eq!(error.kind(), ErrorKind::DisplayHelp);
     }
   }
 
@@ -144,6 +157,12 @@ mod tests {
       };
       assert_eq!(args.hashing.hash_algorithm, expected);
     }
+  }
+
+  #[test]
+  fn hash_algorithms_have_pretty_display_names() {
+    assert_eq!(HashAlgorithm::Sha256.to_string(), "SHA-256");
+    assert_eq!(HashAlgorithm::Downsampled.to_string(), "Downsampled");
   }
 
   #[test]

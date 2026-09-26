@@ -35,6 +35,37 @@ fn print_processing_times(stats: &stat::Statistics) {
   println!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds);
 }
 
+/// Formats run arguments as a labeled, human-readable section.
+fn format_run_args(args: &RunArgs) -> String {
+  let hash_input = args
+    .hash_input
+    .as_deref()
+    .map_or_else(|| "not provided".to_owned(), |path| path.to_string_lossy().into_owned());
+  let hash_threads = match args.hashing.hash_threads {
+    0 => "automatic".to_owned(),
+    count => count.to_string(),
+  };
+  let command = args
+    .command
+    .iter()
+    .map(|arg| arg.to_string_lossy())
+    .collect::<Vec<_>>()
+    .join(" ");
+  [
+    "Arguments:".to_owned(),
+    format!("  Input directory: {}.", args.input_dir.display()),
+    format!("  Output directory: {}.", args.output_dir.display()),
+    format!("  Hash input: {hash_input}."),
+    format!("  Hash algorithm: {}.", args.hashing.hash_algorithm),
+    format!("  Hash threads: {hash_threads}."),
+    format!("  Tile size: {}px.", args.hashing.tile_size),
+    format!("  Jobs: {}.", args.jobs),
+    format!("  Dry run: {}.", if args.dry_run { "yes" } else { "no" }),
+    format!("  Command: {command}."),
+  ]
+  .join("\n")
+}
+
 /// Hashes selected files and writes a JSON hash file.
 fn hash(args: HashArgs) -> anyhow::Result<()> {
   let mut names = input::discover_files(&args.input_dir)?;
@@ -92,7 +123,7 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 }
 
 async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
-  println!("{args:?}");
+  println!("{}", format_run_args(&args));
   println!();
 
   let names = input::discover_files(&args.input_dir)?;
@@ -153,7 +184,36 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::cli::HashAlgorithm;
+  use crate::cli::{HashAlgorithm, HashOptions};
+
+  #[test]
+  fn formats_run_arguments_for_people() {
+    let mut args = RunArgs {
+      input_dir: "input files".into(),
+      output_dir: "output".into(),
+      hash_input: Some("hashes.json".into()),
+      hashing: HashOptions {
+        hash_algorithm: HashAlgorithm::Sha256,
+        hash_threads: 2,
+        tile_size: std::num::NonZeroUsize::new(16).unwrap(),
+      },
+      jobs: std::num::NonZeroUsize::new(4).unwrap(),
+      dry_run: true,
+      command: ["processor", "two words"]
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+    };
+    assert_eq!(
+      format_run_args(&args),
+      "Arguments:\n  Input directory: input files.\n  Output directory: output.\n  Hash input: hashes.json.\n  Hash algorithm: SHA-256.\n  Hash threads: 2.\n  Tile size: 16px.\n  Jobs: 4.\n  Dry run: yes.\n  Command: processor two words."
+    );
+    args.hash_input = None;
+    args.hashing.hash_threads = 0;
+    assert!(format_run_args(&args).contains(
+      "  Hash input: not provided.\n  Hash algorithm: SHA-256.\n  Hash threads: automatic."
+    ));
+  }
 
   #[test]
   fn hash_writes_shared_format_and_excludes_existing_output() {
