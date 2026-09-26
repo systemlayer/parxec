@@ -4,12 +4,14 @@ mod grouping;
 mod hash_file;
 mod hasher;
 mod input;
+mod outcome;
 mod run;
 mod stat;
 
 use anyhow::{Context, bail};
 use clap::Parser;
 use cli::{AnalyzeArgs, Cli, Commands, HashArgs, RunArgs};
+use outcome::CommandOutcome;
 use std::{fs, num::NonZeroUsize, time::Instant};
 use tokio::sync::watch;
 
@@ -89,7 +91,7 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   Ok(())
 }
 
-async fn run(args: RunArgs) -> anyhow::Result<run::ExecutionOutcome> {
+async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
   println!("{args:?}");
   println!();
 
@@ -110,7 +112,7 @@ async fn run(args: RunArgs) -> anyhow::Result<run::ExecutionOutcome> {
     run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)?;
   if args.dry_run {
     run::write_plan(std::io::stdout().lock(), &plan)?;
-    return Ok(run::ExecutionOutcome::Completed);
+    return Ok(CommandOutcome::Completed);
   }
   println!("Processing {} files.", stats.distinct_hashes);
   let (cancellation_sender, cancellation) = watch::channel(false);
@@ -132,8 +134,8 @@ async fn main() -> anyhow::Result<()> {
     Commands::Hash(args) => hash(args),
     Commands::Analyze(args) => analyze(args),
     Commands::Run(args) => match run(args).await? {
-      run::ExecutionOutcome::Completed => Ok(()),
-      run::ExecutionOutcome::Cancelled => std::process::exit(130),
+      CommandOutcome::Completed => Ok(()),
+      CommandOutcome::Cancelled => std::process::exit(130),
     },
   }
 }

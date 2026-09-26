@@ -1,4 +1,4 @@
-use crate::{cli::RunArgs, grouping, hash_file, hasher};
+use crate::{cli::RunArgs, grouping, hash_file, hasher, outcome::CommandOutcome};
 use anyhow::{Context, bail, ensure};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Serialize, Serializer, ser::Error};
@@ -63,13 +63,6 @@ pub struct RunPlan {
   pub batches: Vec<Batch>,
   /// Maps a duplicate file's relative path (key) to the processed file's relative path (value).
   pub redundant: BTreeMap<String, String>,
-}
-
-/// Whether batch execution completed normally or was cancelled by the user.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionOutcome {
-  Completed,
-  Cancelled,
 }
 
 /// Completion details from one asynchronously monitored batch process.
@@ -295,9 +288,9 @@ pub async fn execute_plan(
   plan: &RunPlan,
   output_dir: &Path,
   mut interrupted: watch::Receiver<bool>,
-) -> anyhow::Result<ExecutionOutcome> {
+) -> anyhow::Result<CommandOutcome> {
   if *interrupted.borrow() {
-    return Ok(ExecutionOutcome::Cancelled);
+    return Ok(CommandOutcome::Cancelled);
   }
   let total_representatives = plan
     .batches
@@ -319,7 +312,7 @@ pub async fn execute_plan(
     if *interrupted.borrow() {
       cancel_batches(&cancellation, &mut tasks).await;
       progress.finish_and_clear();
-      return Ok(ExecutionOutcome::Cancelled);
+      return Ok(CommandOutcome::Cancelled);
     }
     let child = Command::new(&batch.command.program)
       .args(&batch.command.arguments)
@@ -351,7 +344,7 @@ pub async fn execute_plan(
         changed.context("run interruption channel closed unexpectedly")?;
         cancel_batches(&cancellation, &mut tasks).await;
         progress.finish_and_clear();
-        return Ok(ExecutionOutcome::Cancelled);
+        return Ok(CommandOutcome::Cancelled);
       }
       _ = poll.tick() => match count_output_files(output_dir).await {
         Ok(count) => update_progress(&progress, count, total_representatives),
@@ -388,7 +381,7 @@ pub async fn execute_plan(
     Ok(count) => {
       update_progress(&progress, count, total_representatives);
       progress.finish();
-      Ok(ExecutionOutcome::Completed)
+      Ok(CommandOutcome::Completed)
     }
     Err(error) => {
       progress.finish_and_clear();
@@ -832,7 +825,7 @@ mod tests {
     })
     .await
     .unwrap();
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_eq!(outcome, CommandOutcome::Cancelled);
     assert!(!batch_dir.exists());
     assert!(input_dir.join("a.bin").exists());
   }
@@ -996,7 +989,7 @@ mod tests {
     let outcome = execute_plan(&execution_plan(vec![command]), &output_dir, interruption)
       .await
       .unwrap();
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_eq!(outcome, CommandOutcome::Cancelled);
     assert!(!output_dir.join("launched").exists());
   }
 
@@ -1028,7 +1021,7 @@ mod tests {
     .expect("interruption should promptly terminate the child")
     .unwrap();
     signal_task.await.unwrap();
-    assert_eq!(outcome, ExecutionOutcome::Cancelled);
+    assert_eq!(outcome, CommandOutcome::Cancelled);
     let pid = fs::read_to_string(output_dir.join("pid")).unwrap();
     let running = std::process::Command::new("kill")
       .args(["-0", pid.trim()])
