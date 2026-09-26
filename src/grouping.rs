@@ -12,6 +12,16 @@ pub struct Grouping {
   pub redundant: BTreeMap<String, String>,
 }
 
+impl Grouping {
+  /// Returns at most the first `limit` hash groups and redundant mappings.
+  pub fn truncate(self, limit: usize) -> (Self, bool) {
+    let truncated = self.groups.len() > limit || self.redundant.len() > limit;
+    let groups = self.groups.into_iter().take(limit).collect();
+    let redundant = self.redundant.into_iter().take(limit).collect();
+    (Self { groups, redundant }, truncated)
+  }
+}
+
 /// Groups files by hash and chooses the first filename in lexical order as representative.
 ///
 /// `BTreeMap` keeps hash groups and redundant mappings in a predictable order.
@@ -56,5 +66,27 @@ mod tests {
     assert_eq!(result.redundant["b.png"], "a.png");
     assert_eq!(result.redundant["z.png"], "a.png");
     assert!(!result.redundant.contains_key("c.png"));
+  }
+
+  #[test]
+  fn truncates_preview_entries_in_lexical_order() {
+    let hashes = (0..12)
+      .flat_map(|index| {
+        [
+          (format!("a-{index:02}.png"), format!("hash-{index:02}")),
+          (format!("b-{index:02}.png"), format!("hash-{index:02}")),
+        ]
+      })
+      .collect::<HashFile>();
+    let (result, truncated) = group(&hashes).truncate(10);
+    assert!(truncated);
+    assert_eq!(result.groups.len(), 10);
+    assert_eq!(result.redundant.len(), 10);
+    assert!(result.groups.contains_key("hash-09"));
+    assert!(!result.groups.contains_key("hash-10"));
+    assert!(result.redundant.contains_key("b-09.png"));
+    assert!(!result.redundant.contains_key("b-10.png"));
+    let (_, truncated) = result.truncate(10);
+    assert!(!truncated);
   }
 }

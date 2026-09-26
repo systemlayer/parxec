@@ -14,6 +14,9 @@ use outcome::CommandOutcome;
 use std::{fs, num::NonZeroUsize, time::Instant};
 use tokio::sync::watch;
 
+/// Maximum number of entries retained in each dry-run preview collection.
+const DRY_RUN_PREVIEW_LIMIT: usize = 10;
+
 /// Formats file counts, duplicate percentages, and optional measured hashing time.
 fn format_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>) -> String {
   let mut lines = vec![
@@ -150,10 +153,19 @@ async fn run(args: RunArgs) -> anyhow::Result<CommandOutcome> {
   println!("{}", format_file_statistics(&stats, Some(elapsed.as_secs_f64())));
   println!();
 
+  let (grouping, was_truncated) = if args.dry_run {
+    grouping.truncate(DRY_RUN_PREVIEW_LIMIT)
+  } else {
+    (grouping, false)
+  };
   let plan =
     run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)?;
   if args.dry_run {
     run::write_plan(std::io::stdout().lock(), &plan)?;
+    if was_truncated {
+      println!();
+      println!("Preview truncated to {DRY_RUN_PREVIEW_LIMIT} entries per collection.");
+    }
     return Ok(CommandOutcome::Completed);
   }
 
