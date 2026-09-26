@@ -30,9 +30,9 @@ fn print_file_statistics(stats: &stat::Statistics, hashing_seconds: Option<f64>)
 
 /// Prints processing times for all, distinct, and redundant files.
 fn print_processing_times(stats: &stat::Statistics) {
-  println!("  All files: {:.2}s.", stats.estimated_all_seconds);
-  println!("  Distinct files: {:.2}s.", stats.estimated_unique_seconds);
-  println!("  Time saved: {:.2}s.", stats.estimated_saved_seconds);
+  println!("  All files (without duplicate skipping): {:.2}s.", stats.estimated_all_seconds);
+  println!("  Distinct files (actual time): {:.2}s.", stats.estimated_unique_seconds);
+  println!("  Time saved (by skipping duplicates): {:.2}s.", stats.estimated_saved_seconds);
 }
 
 /// Hashes selected files and writes a JSON hash file.
