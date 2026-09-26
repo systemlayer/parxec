@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod cli;
 mod grouping;
 mod hash_file;
