@@ -3,6 +3,7 @@ use std::{ffi::OsString, fmt, num::NonZeroUsize, path::PathBuf};
 
 #[derive(Parser)]
 #[command(about = "Process file collections and run commands in parallel")]
+#[command(version)]
 #[command(subcommand_required = true, arg_required_else_help = true)]
 pub struct Cli {
   #[command(subcommand)]
@@ -122,6 +123,17 @@ mod tests {
         .err()
         .expect("help arguments should produce a display error");
       assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+    }
+  }
+
+  #[test]
+  fn version_is_available_at_root() {
+    for argument in ["--version", "-V"] {
+      let error = Cli::try_parse_from(["parxec", argument])
+        .err()
+        .expect("version argument should produce a display error");
+      assert_eq!(error.kind(), ErrorKind::DisplayVersion);
+      assert_eq!(error.to_string(), format!("parxec {}\n", env!("CARGO_PKG_VERSION")));
     }
   }
 
