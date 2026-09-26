@@ -52,6 +52,7 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   if names.is_empty() {
     bail!("input directory {} contains no files to hash", args.input_dir.display());
   }
+
   println!("Hashing {} files.", names.len());
   let start = Instant::now();
   let hashes = hasher::hash_files(
@@ -66,9 +67,11 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
   let grouping = grouping::group(&hashes);
   println!("Saved hashes to {}.", args.hash_output.display());
   println!();
+
   let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
   print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
   println!();
+
   print_processing_times(&stats, args.jobs, args.file_ms);
   Ok(())
 }
@@ -77,9 +80,11 @@ fn hash(args: HashArgs) -> anyhow::Result<()> {
 fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
   let hashes = hash_file::read(&args.hash_input)?;
   let grouping = grouping::group(&hashes);
+
   let stats = stat::calculate(&grouping, args.jobs, args.file_ms);
   print_file_statistics(&stats, None);
   println!();
+
   print_processing_times(&stats, args.jobs, args.file_ms);
   Ok(())
 }
@@ -87,20 +92,27 @@ fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 async fn run(args: RunArgs) -> anyhow::Result<run::ExecutionOutcome> {
   println!("{args:?}");
   println!();
+
   let names = input::discover_files(&args.input_dir)?;
+
+  println!("Hashing {} files.", names.len());
   let start = Instant::now();
   let hashes = run::resolve_hashes(&args, &names)?;
   let elapsed = start.elapsed();
   let grouping = grouping::group(&hashes);
+  println!();
+
   let stats = stat::calculate(&grouping, args.jobs, 0);
   print_file_statistics(&stats, Some(elapsed.as_secs_f64()));
   println!();
+
   let plan =
     run::prepare_plan(&args.input_dir, &args.output_dir, args.jobs, &args.command, grouping)?;
   if args.dry_run {
     run::write_plan(std::io::stdout().lock(), &plan)?;
     return Ok(run::ExecutionOutcome::Completed);
   }
+  println!("Processing {} files.", stats.distinct_hashes);
   let (cancellation_sender, cancellation) = watch::channel(false);
   ctrlc::set_handler(move || {
     cancellation_sender.send_replace(true);
