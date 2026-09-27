@@ -34,6 +34,7 @@ RUN printf '%s\n' \
         'approval_policy = "on-request"' \
         '[features]' \
         'memories = false' \
+        'daemon_auto_start = false' \
         '[memories]' \
         'generate_memories = false' \
         'use_memories = false' \
