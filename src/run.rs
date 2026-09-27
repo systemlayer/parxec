@@ -283,11 +283,13 @@ fn batch_exit_error(result: BatchResult) -> anyhow::Error {
   anyhow::anyhow!(message.trim_end().to_owned())
 }
 
-/// Cancels all active batches and waits until their worker tasks have ended.
-async fn cancel_batches(
+/// Clears progress, cancels all active batches, and waits until their worker tasks have ended.
+async fn stop_batch_execution(
+  progress: &ProgressBar,
   cancellation: &watch::Sender<bool>,
   tasks: &mut JoinSet<anyhow::Result<BatchResult>>,
 ) {
+  progress.finish_and_clear();
   cancellation.send_replace(true);
   while tasks.join_next().await.is_some() {}
 }
@@ -319,8 +321,7 @@ pub async fn execute_plan(
   // Launch every batch concurrently, cancelling already-running batches if a later launch fails.
   for (batch_index, batch) in plan.batches.iter().enumerate() {
     if *interrupted.borrow() {
-      cancel_batches(&cancellation, &mut tasks).await;
-      progress.finish_and_clear();
+      stop_batch_execution(&progress, &cancellation, &mut tasks).await;
       return Ok(CommandOutcome::Cancelled);
     }
     let child = Command::new(&batch.command.program)
@@ -333,8 +334,7 @@ pub async fn execute_plan(
     let child = match child {
       Ok(child) => child,
       Err(error) => {
-        cancel_batches(&cancellation, &mut tasks).await;
-        progress.finish_and_clear();
+        stop_batch_execution(&progress, &cancellation, &mut tasks).await;
         return Err(error);
       }
     };
@@ -351,33 +351,28 @@ pub async fn execute_plan(
       biased;
       changed = interrupted.changed() => {
         changed.context("run interruption channel closed unexpectedly")?;
-        cancel_batches(&cancellation, &mut tasks).await;
-        progress.finish_and_clear();
+        stop_batch_execution(&progress, &cancellation, &mut tasks).await;
         return Ok(CommandOutcome::Cancelled);
       }
       _ = poll.tick() => match count_output_files(output_dir).await {
         Ok(count) => update_progress(&progress, count, total_representatives),
         Err(error) => {
-          cancel_batches(&cancellation, &mut tasks).await;
-          progress.finish_and_clear();
+          stop_batch_execution(&progress, &cancellation, &mut tasks).await;
           return Err(error);
         }
       },
       completed = tasks.join_next() => match completed {
         Some(Ok(Ok(result))) if result.status.is_some_and(|status| !status.success()) => {
-          cancel_batches(&cancellation, &mut tasks).await;
-          progress.finish_and_clear();
+          stop_batch_execution(&progress, &cancellation, &mut tasks).await;
           return Err(batch_exit_error(result));
         }
         Some(Ok(Ok(_))) => {}
         Some(Ok(Err(error))) => {
-          cancel_batches(&cancellation, &mut tasks).await;
-          progress.finish_and_clear();
+          stop_batch_execution(&progress, &cancellation, &mut tasks).await;
           return Err(error);
         }
         Some(Err(error)) => {
-          cancel_batches(&cancellation, &mut tasks).await;
-          progress.finish_and_clear();
+          stop_batch_execution(&progress, &cancellation, &mut tasks).await;
           return Err(error).context("batch monitor task failed");
         }
         None => break,
@@ -1061,6 +1056,32 @@ mod tests {
     .await
     .expect("failed batch should promptly terminate its sibling");
     assert!(result.unwrap_err().to_string().contains("exit status: 9"));
+  }
+
+  #[tokio::test]
+  async fn clears_progress_before_waiting_for_cancelled_batches() {
+    let progress = ProgressBar::hidden();
+    progress.enable_steady_tick(PROGRESS_TICK_INTERVAL);
+    let (cancellation, mut cancellation_receiver) = watch::channel(false);
+    let mut tasks = JoinSet::<anyhow::Result<BatchResult>>::new();
+    tasks.spawn(async move {
+      cancellation_receiver
+        .changed()
+        .await
+        .expect("cancellation sender should remain open during test");
+      std::future::pending::<()>().await;
+      unreachable!()
+    });
+    assert!(!progress.is_finished());
+    let shutdown = time::timeout(
+      Duration::from_millis(20),
+      stop_batch_execution(&progress, &cancellation, &mut tasks),
+    )
+    .await;
+    assert!(shutdown.is_err());
+    assert!(progress.is_finished());
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
   }
 
   #[cfg(unix)]
